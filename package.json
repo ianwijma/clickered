@@ -1,0 +1,28 @@
+{
+  "name": "clickered",
+  "version": "0.1.0",
+  "description": "Replicate clicks, drags and keys from one window to a group of windows (X11).",
+  "private": true,
+  "main": "./out/main/index.js",
+  "scripts": {
+    "build:helper": "make -C native",
+    "dev": "npm run build:helper && electron-vite dev",
+    "build": "npm run build:helper && electron-vite build",
+    "start": "npm run build && electron .",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "effect": "^4.1.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.5",
+    "@types/node": "^26.6.6",
+    "electron": "^45.3.1",
+    "electron-vite": "^6.0.0",
+    "tailwindcss": "^4.3.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  }
+}

@@ -9,7 +9,7 @@ Linux / X11 only. Design notes: [docs/PLAN.md](docs/PLAN.md).
 
 ## Install
 
-Download the AppImage, `.deb` or `.tar.gz` from the
+Download the `.deb` from the
 [latest release](https://github.com/ianwijma/clickered/releases/latest) (Linux x64).
 Releasing: [docs/RELEASING.md](docs/RELEASING.md).
 

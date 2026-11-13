@@ -12,9 +12,9 @@ summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 cd "$(dirname "$0")/../../dist"
 
 shopt -s nullglob
-files=(*.AppImage *.deb *.tar.gz)
-if (( ${#files[@]} != 3 )); then
-  echo "::error::Expected an AppImage, a .deb and a .tar.gz in dist/, got: ${files[*]:-nothing}"
+files=(*.deb)
+if (( ${#files[@]} != 1 )); then
+  echo "::error::Expected one .deb in dist/, got: ${files[*]:-nothing}"
   exit 1
 fi
 

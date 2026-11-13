@@ -15,7 +15,7 @@ run-name: Release ${{ inputs.version_bump }} ${{ inputs.release_type }}${{ input
 #    then approve or reject under "Review deployments". Once approved, it commits
 #    the new version to the default branch and pushes the `vX.Y.Z` tag.
 # 3. `package` checks out that tag, builds the production app with electron-builder
-#    (AppImage, .deb and .tar.gz for Linux x64), and creates the GitHub Release
+#    (a .deb for Linux x64), and creates the GitHub Release
 #    with those files attached. Nothing is published to npm.
 #
 # A dry run does everything except push and release: the packaged app is still
@@ -231,6 +231,11 @@ jobs:
       # Builds the native helper and the electron-vite bundles, then packages them
       # with electron-builder (electron-builder.yml) into dist/.
       - name: Build production app
+        env:
+          # fpm compresses the .deb with `tar -J` (XZ_OPT=-3). The runner's xz 5.4 is
+          # single-threaded by default, which made this step take minutes; -T0 uses
+          # every core. Same format, same compression level.
+          XZ_DEFAULTS: -T0
         run: npm run dist
 
       - name: Collect release files
@@ -244,9 +249,7 @@ jobs:
         with:
           name: clickered-${{ needs.plan.outputs.version }}
           path: |
-            dist/*.AppImage
             dist/*.deb
-            dist/*.tar.gz
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14

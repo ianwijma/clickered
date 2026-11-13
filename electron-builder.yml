@@ -3,7 +3,7 @@
 # files to the GitHub Release.
 appId: ma.wij.clickered
 productName: clickered
-# Same file names for every version and arch, e.g. clickered-0.2.0-x86_64.AppImage.
+# Same file names for every version and arch, e.g. clickered-0.2.0-amd64.deb.
 artifactName: ${name}-${version}-${arch}.${ext}
 
 directories:
@@ -29,10 +29,10 @@ linux:
   # build/icons/512x512.png, rendered from assets/icon.svg in CI. Without it the
   # package falls back to the default Electron icon.
   icon: build/icons
+  # Only the .deb: each extra target (AppImage, tar.gz) adds packaging time to
+  # every release.
   target:
-    - AppImage
     - deb
-    - tar.gz
 
 # electron-builder's default Electron dependencies, plus the X11 libraries the
 # native helper links against (native/Makefile). Setting `depends` replaces the

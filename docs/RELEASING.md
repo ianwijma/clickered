@@ -8,12 +8,10 @@ Each release has these files:
 
 | File | What it is |
 |---|---|
-| `clickered-X.Y.Z-x86_64.AppImage` | Portable app: `chmod +x` and run. |
 | `clickered-X.Y.Z-amd64.deb` | Debian/Ubuntu package: `sudo apt install ./clickered-X.Y.Z-amd64.deb`. |
-| `clickered-X.Y.Z-x64.tar.gz` | The unpacked app; run `clickered` inside it. |
-| `SHA256SUMS.txt` | Checksums of the files above. |
+| `SHA256SUMS.txt` | Checksum of the file above. |
 
-All are Linux x64 builds with the native X11 helper included.
+It is a Linux x64 build with the native X11 helper included.
 
 ## Run a release
 

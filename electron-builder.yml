@@ -1,0 +1,52 @@
+# Packages the production build for Linux (X11): `npm run dist` → dist/.
+# The Release workflow (.github/workflows/release.yml) runs it and attaches the
+# files to the GitHub Release.
+appId: ma.wij.clickered
+productName: clickered
+# Same file names for every version and arch, e.g. clickered-0.2.0-x86_64.AppImage.
+artifactName: ${name}-${version}-${arch}.${ext}
+
+directories:
+  output: dist
+  buildResources: build
+
+# electron-vite bundles main, preload and renderer into out/; production
+# dependencies from node_modules are added by electron-builder itself.
+files:
+  - out/**/*
+  - package.json
+
+# The native X11 helper, found at process.resourcesPath (src/main/index.ts).
+extraResources:
+  - from: resources/clickered-helper
+    to: clickered-helper
+
+linux:
+  category: Utility
+  # Matches package.json desktopName, so the window is linked to the .desktop entry.
+  syncDesktopName: true
+  synopsis: Replicate clicks and drags across a group of windows
+  # build/icons/512x512.png, rendered from assets/icon.svg in CI. Without it the
+  # package falls back to the default Electron icon.
+  icon: build/icons
+  target:
+    - AppImage
+    - deb
+    - tar.gz
+
+# electron-builder's default Electron dependencies, plus the X11 libraries the
+# native helper links against (native/Makefile). Setting `depends` replaces the
+# defaults, so they are repeated here.
+deb:
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libuuid1
+    - libsecret-1-0
+    - libx11-6
+    - libxi6

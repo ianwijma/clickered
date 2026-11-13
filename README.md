@@ -7,7 +7,13 @@ Created in [T3 Code](https://t3.codes).
 Replicate clicks and drags from one window into a group of other windows.
 Linux / X11 only. Design notes: [docs/PLAN.md](docs/PLAN.md).
 
-## Run
+## Install
+
+Download the AppImage, `.deb` or `.tar.gz` from the
+[latest release](https://github.com/ianwijma/clickered/releases/latest) (Linux x64).
+Releasing: [docs/RELEASING.md](docs/RELEASING.md).
+
+## Run from source
 
 ```sh
 npm install

@@ -200,6 +200,20 @@ describe("engine (fake helper)", () => {
     await waitFor(() => fake.log().includes("keys 0"))
   })
 
+  it("drops buffered keys when their source window is excluded before the flush", async () => {
+    const key = (down: boolean, keycode: number, w = 20, time = 0): HelperMessage => ({ t: "key", down, keycode, win: w, time })
+    const { engine, seqs } = setup({
+      config: { replicateKeys: true },
+      events: [key(true, 38), key(false, 38)],
+    })
+    await waitFor(() => engine.getState().helper === "ready" && engine.getState().windows.length === 3)
+    // Keys arrive ~80 ms after startup; the buffer flushes 350 ms after the last one.
+    await sleep(150)
+    engine.command({ c: "setIncluded", id: 20, included: false })
+    await sleep(600)
+    expect(seqs()).toEqual([])
+  })
+
   it("sends abort when disabled mid-replay", async () => {
     const { engine, fake } = setup({
       env: { FAKE_SEQ_HANG: "1" },

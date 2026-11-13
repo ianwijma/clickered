@@ -17,7 +17,7 @@ Releasing: [docs/RELEASING.md](docs/RELEASING.md).
 
 ```sh
 npm install
-npm start        # builds the native helper (needs gcc, libx11-dev, libxi-dev, libxtst-dev) and launches the bar
+npm start        # builds the native helper (needs gcc, pkg-config, libx11-dev, libxi-dev, libxtst-dev) and launches the bar
 ```
 
 ## Use

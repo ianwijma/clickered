@@ -222,6 +222,8 @@ export const startEngine = (opts: EngineOptions): Engine => {
         const m = get()
         const h = helper
         if (!m.enabled || !h || m.helper !== "ready" || m.picking) return
+        // The source may have been excluded or un-pinned while the gesture was queued.
+        if (!isSource(m, g.source)) return
         const ops = buildScript(g, targetsFor(m, g.source), { timing, dragSpeed: m.dragSpeed })
         if (ops.length === 0) return
         yield* update((s) => ({ ...s, busy: true }))
@@ -396,10 +398,11 @@ export const startEngine = (opts: EngineOptions): Engine => {
       Effect.gen(function* () {
         const before = groupKey(get())
         const a = yield* f
-        if (groupKey(get()) !== before) {
-          yield* abortAll("group membership changed")
-          if (rec && !isSource(get(), rec.source)) rec = null
-        }
+        if (groupKey(get()) !== before) yield* abortAll("group membership changed")
+        // Excluding a window or pinning another master can make an in-progress recording's
+        // source ineligible without changing the group itself; forget what it recorded.
+        if (rec && !isSource(get(), rec.source)) rec = null
+        if (keyBuf && !isSource(get(), keyBuf.source)) yield* dropKeys()
         return a
       })
 

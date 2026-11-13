@@ -70,17 +70,19 @@ press immediately followed by a release.
 
 | Op | Meaning |
 |---|---|
-| `f WIN` | Activate WIN (`_NET_ACTIVE_WINDOW` client message, source indication 2, plus `XRaiseWindow`) and wait until `_NET_ACTIVE_WINDOW` equals WIN, at most 200 ms. |
-| `m WIN FX FY` | Warp (XTest fake motion) to that fraction of WIN's content rect. If the client window under the pointer is then not WIN and no button is currently held by this seq, activate + raise WIN as in `f`, then warp again. |
+| `f WIN` | Activate WIN (`_NET_ACTIVE_WINDOW` client message, source indication 2, plus `XRaiseWindow`) and wait until `_NET_ACTIVE_WINDOW` equals WIN, at most 200 ms. If WIN is still not active after that, enter skip mode for WIN. |
+| `m WIN FX FY` | Warp (XTest fake motion) to that fraction of WIN's content rect. If the client window under the pointer is then not WIN and no button is currently held by this seq, activate + raise WIN as in `f`, then warp again and wait (at most 100 ms) until WIN is under the pointer. If activation or that wait fails, enter skip mode for WIN. |
 | `d BTN` / `u BTN` | XTest button press / release. |
 | `kd CODE` / `ku CODE` | XTest key press / release. |
 | `s MS` | Sleep. |
 | `w X Y` | Warp to absolute root coordinates. |
 
+`FX`/`FY` must be finite with an absolute value of at most 100. `X`/`Y` must be within ±32767. Out-of-range values reject the whole `seq` (`error`, then `done` with `ok:false`).
+
 Rules:
 
 - **Skip mode**: if `f` or `m` names a window that no longer exists (or is
-  unmapped), the helper first releases anything this seq holds, then ignores
+  unmapped, or cannot be focused / brought under the pointer as described above), the helper first releases anything this seq holds, then ignores
   `d`/`u`/`kd`/`ku`/`s` until the next `f`, `m` or `w` op. A `m` for the *same*
   missing window stays skipped.
 - At the end of a seq (normal, aborted, or stdin EOF) every button and key the

@@ -98,8 +98,11 @@ jobs:
 
       - name: Require the default branch
         if: github.ref_name != github.event.repository.default_branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BRANCH: ${{ github.ref_name }}
         run: |
-          echo "::error::Releases run from '${{ github.event.repository.default_branch }}' only (got '${{ github.ref_name }}')."
+          echo "::error::Releases run from '${DEFAULT_BRANCH}' only (got '${BRANCH}')."
           exit 1
 
       - name: Check out repository
@@ -221,7 +224,9 @@ jobs:
 
       - name: Apply the bumped version (dry run only)
         if: ${{ inputs.dry_run }}
-        run: npm version "${{ needs.plan.outputs.version }}" --no-git-tag-version
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: npm version "$VERSION" --no-git-tag-version
 
       - name: Render the app icon
         run: |

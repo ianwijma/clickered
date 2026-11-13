@@ -13,7 +13,7 @@ set -euo pipefail
 : "${TAG:?}" "${PRERELEASE:?}"
 cd "$(dirname "$0")/../.."
 
-files=(dist/*.AppImage dist/*.deb dist/*.tar.gz dist/SHA256SUMS.txt)
+files=(dist/*.deb dist/SHA256SUMS.txt)
 if [[ "$PRERELEASE" == "true" ]]; then kind=(--prerelease); else kind=(--latest); fi
 
 # `gh release create` with files makes a draft, uploads to it, then publishes it.

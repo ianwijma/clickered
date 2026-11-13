@@ -29,6 +29,9 @@ function helperPath(): string {
     : join(app.getAppPath(), "resources", "clickered-helper")
 }
 
+// Window icon (taskbar, alt-tab, window lists). Electron can't load SVG here, so use the PNG.
+const appIconPath = (): string => join(app.getAppPath(), "assets", "icon.png")
+
 function onSomeDisplay(p: BarPosition, size: { width: number; height: number }): boolean {
   return screen.getAllDisplays().some(({ workArea: a }) => {
     const cx = p.x + Math.min(size.width, 80) / 2
@@ -70,6 +73,7 @@ function main(): void {
       alwaysOnTop: true,
       show: false,
       title: "clickered",
+      icon: appIconPath(),
       webPreferences: {
         preload: join(__dirname, "../preload/index.js"),
         contextIsolation: true,

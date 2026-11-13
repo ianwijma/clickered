@@ -151,60 +151,7 @@ jobs:
           VERSION: ${{ steps.next.outputs.version }}
           TAG: ${{ steps.next.outputs.tag }}
           PRERELEASE: ${{ steps.next.outputs.prerelease }}
-        run: |
-          name="$(node -p "require('./package.json').name")"
-          current="$(node -p "require('./package.json').version")"
-          # `gh release view` without a tag is the release marked latest (never a prerelease).
-          gh_latest="$(gh release view --json tagName --jq .tagName 2>/dev/null || echo none)"
-          gh_newest="$(gh release list --limit 1 --json tagName --jq '.[0].tagName // "none"' 2>/dev/null || echo none)"
-          last_tag="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo none)"
-
-          # Each check is a blocker: the run stops here and nothing is pushed or released.
-          blockers=()
-          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null; then
-            blockers+=("The tag \`${TAG}\` already exists.")
-          fi
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            blockers+=("A GitHub Release for \`${TAG}\` already exists.")
-          fi
-          if [[ "$PRERELEASE" != "true" && "$gh_latest" != "none" ]] \
-            && ! node -e 'process.exit(require("semver").gt(process.argv[1], process.argv[2]) ? 0 : 1)' "$VERSION" "${gh_latest#v}"; then
-            blockers+=("\`${VERSION}\` is not newer than the latest GitHub Release (\`${gh_latest}\`).")
-          fi
-
-          {
-            echo "## Release plan: \`${current}\` → \`${VERSION}\`"
-            [[ "$DRY_RUN" == "true" ]] && echo "> **Dry run:** nothing will be pushed or released. The packaged app is kept as a workflow artifact."
-            echo
-            echo "| | Now | After this release |"
-            echo "|---|---|---|"
-            echo "| \`package.json\` on \`${GITHUB_REF_NAME}\` | \`${current}\` | \`${VERSION}\` |"
-            echo "| Latest GitHub Release | \`${gh_latest}\` | $([[ "$PRERELEASE" != "true" ]] && echo "\`${TAG}\`" || echo "\`${gh_latest}\` (\`${TAG}\` as a prerelease)") |"
-            echo "| Newest GitHub Release (incl. prereleases) | \`${gh_newest}\` | \`${TAG}\` |"
-            echo "| Git tag | \`${last_tag}\` | \`${TAG}\` |"
-            echo
-            echo "- **Version bump:** \`${BUMP}\`, **release type:** \`${RELEASE_TYPE}\`"
-            echo "- **Commit:** \`${GITHUB_SHA::7}\` on \`${GITHUB_REF_NAME}\`"
-            echo "- **Attached to the release:**"
-            echo "  - \`${name}-${VERSION}-x86_64.AppImage\`"
-            echo "  - \`${name}-${VERSION}-amd64.deb\`"
-            echo "  - \`${name}-${VERSION}-x64.tar.gz\`"
-            echo "  - \`SHA256SUMS.txt\`"
-            echo
-            echo "### Blockers"
-            if (( ${#blockers[@]} )); then
-              for b in "${blockers[@]}"; do echo "- ❌ ${b}"; done
-            else
-              echo "- ✅ None. Approve the \`release\` environment under **Review deployments** to continue, or reject it to stop."
-            fi
-            echo
-            echo "### Changes since \`${last_tag}\`"
-            if [[ "$last_tag" == none ]]; then range=HEAD; else range="${last_tag}..HEAD"; fi
-            git log --no-merges --format='- %s (`%h`)' "$range" | head -n 50
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          for b in "${blockers[@]}"; do echo "::error::${b//\`/}"; done
-          (( ${#blockers[@]} == 0 ))
+        run: scripts/release/plan.sh
 
   version:
     name: Commit and tag ${{ needs.plan.outputs.tag }}
@@ -287,24 +234,9 @@ jobs:
         run: npm run dist
 
       - name: Collect release files
-        id: files
-        working-directory: dist
-        run: |
-          shopt -s nullglob
-          files=(*.AppImage *.deb *.tar.gz)
-          if (( ${#files[@]} != 3 )); then
-            echo "::error::Expected an AppImage, a .deb and a .tar.gz in dist/, got: ${files[*]:-nothing}"
-            exit 1
-          fi
-          sha256sum "${files[@]}" > SHA256SUMS.txt
-          cat SHA256SUMS.txt
-          {
-            echo "## Packaged ${{ needs.plan.outputs.tag }}"
-            echo
-            echo '```'
-            ls -lh "${files[@]}" SHA256SUMS.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: scripts/release/collect-files.sh
 
       # Always kept on the run (dry runs included), so the build can be tried before release.
       - name: Upload build as a workflow artifact
@@ -319,19 +251,11 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # On a re-run after a failed upload, replaces the files on the existing release.
       - name: Create GitHub Release
         if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.plan.outputs.tag }}
           PRERELEASE: ${{ needs.plan.outputs.prerelease }}
-        run: |
-          files=(dist/*.AppImage dist/*.deb dist/*.tar.gz dist/SHA256SUMS.txt)
-          # A re-run after a failed upload: replace the files on the existing release.
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${files[@]}" --clobber
-            exit 0
-          fi
-          args=(--verify-tag --generate-notes --title "$TAG")
-          if [[ "$PRERELEASE" == "true" ]]; then args+=(--prerelease); else args+=(--latest); fi
-          gh release create "$TAG" "${files[@]}" "${args[@]}"
+        run: scripts/release/publish.sh

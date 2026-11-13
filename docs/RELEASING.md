@@ -63,6 +63,9 @@ Release candidates, step by step (keep the same **Version bump** each time):
   workflow artifact, and creates the GitHub Release with generated notes and the
   files attached.
 
+The longer steps live in `scripts/release/` (`plan.sh`, `collect-files.sh`,
+`publish.sh`); each documents the environment variables it reads at the top.
+
 A dry run still builds the packages: download them from the run's **Artifacts**
 to try a build before releasing it.
 

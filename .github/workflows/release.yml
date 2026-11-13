@@ -1,0 +1,261 @@
+name: Release
+
+# The run's title in the Actions list, e.g. "Release minor prerelease (rc) · dry run".
+# GitHub sets it at dispatch, before any job runs, so it can only use the inputs: the
+# exact versions are in the job names and the plan summary.
+run-name: Release ${{ inputs.version_bump }} ${{ inputs.release_type }}${{ inputs.release_type == 'prerelease' && format(' ({0})', inputs.prerelease_identifier) || '' }}${{ inputs.dry_run && ' · dry run' || '' }}
+
+# Run from the GitHub UI: Actions → Release → "Run workflow", pick a version bump
+# and a release type. See docs/RELEASING.md.
+#
+# 1. `plan` tests and builds, works out the new version, and writes a summary of
+#    what is released now and what this run will release. It fails on blockers
+#    (e.g. the tag already exists). Nothing is changed yet.
+# 2. `version` waits for approval on the `release` environment. Read the summary,
+#    then approve or reject under "Review deployments". Once approved, it commits
+#    the new version to the default branch and pushes the `vX.Y.Z` tag.
+# 3. `package` checks out that tag, builds the production app with electron-builder
+#    (AppImage, .deb and .tar.gz for Linux x64), and creates the GitHub Release
+#    with those files attached. Nothing is published to npm.
+#
+# A dry run does everything except push and release: the packaged app is still
+# uploaded as a workflow artifact, so you can download and try it.
+#
+# If `package` fails, use "Re-run failed jobs": it builds the tag that was already
+# pushed and does not bump the version again.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: Version bump
+        type: choice
+        required: true
+        default: patch
+        # Examples from 1.2.3 (see scripts/next-version.mjs):
+        options:
+          - patch # 1.2.4 (bug fixes)
+          - minor # 1.3.0 (new features, backwards compatible)
+          - major # 2.0.0 (breaking changes)
+      release_type:
+        description: Release type (prerelease = release candidate, marked as a GitHub prerelease; release = stable, marked as latest)
+        type: choice
+        required: true
+        default: prerelease
+        # prerelease: 1.2.3 + minor → 1.3.0-rc.0; run it again → 1.3.0-rc.1, ...
+        # release:    1.2.3 + minor → 1.3.0; on a candidate, 1.3.0-rc.1 + minor → 1.3.0
+        options:
+          - prerelease
+          - release
+      dry_run:
+        description: Dry run (no push, no GitHub Release; the build is kept as a workflow artifact)
+        type: boolean
+        required: false
+        default: true
+      prerelease_identifier:
+        description: Prerelease identifier, for prereleases only (rc → 1.3.0-rc.0)
+        type: string
+        required: false
+        default: rc
+
+permissions:
+  contents: read
+
+# One release at a time, and never cancel one halfway through.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # Electron 45, Vite 8 and Vitest 5 need Node.js 22.12+.
+  NODE_VERSION: "22"
+  # Build tools for the native X11 helper (native/Makefile) and the icon renderer.
+  APT_PACKAGES: pkg-config libx11-dev libxi-dev libxtst-dev librsvg2-bin
+
+jobs:
+  plan:
+    name: Plan release (${{ inputs.version_bump }} ${{ inputs.release_type }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+      tag: ${{ steps.next.outputs.tag }}
+      prerelease: ${{ steps.next.outputs.prerelease }}
+    steps:
+      # Running a workflow already needs write access to the repository. This also
+      # limits releases to the logins in the RELEASE_ACTORS repository variable
+      # (space- or comma-separated), or to the repository owner when it is unset.
+      - name: Require an allowed releaser
+        env:
+          ACTOR: ${{ github.actor }}
+          ALLOWED: ${{ vars.RELEASE_ACTORS || github.repository_owner }}
+        run: |
+          for login in ${ALLOWED//,/ }; do
+            if [[ "${login,,}" == "${ACTOR,,}" ]]; then exit 0; fi
+          done
+          echo "::error::${ACTOR} may not run releases (allowed: ${ALLOWED})."
+          exit 1
+
+      - name: Require the default branch
+        if: github.ref_name != github.event.repository.default_branch
+        run: |
+          echo "::error::Releases run from '${{ github.event.repository.default_branch }}' only (got '${{ github.ref_name }}')."
+          exit 1
+
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # all tags, for the changes since the last release
+
+      - name: Install build tools
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends $APT_PACKAGES
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Check types
+        run: npm run typecheck
+
+      # The native helper and the electron-vite bundles; packaging happens after approval.
+      - name: Build app
+        run: npm run build
+
+      - name: Work out the new version
+        id: next
+        env:
+          BUMP: ${{ inputs.version_bump }}
+          RELEASE_TYPE: ${{ inputs.release_type }}
+          PRERELEASE_IDENTIFIER: ${{ inputs.prerelease_identifier }}
+        run: |
+          # Works out the next version from package.json (tested in scripts/next-version.test.ts).
+          version="$(node scripts/next-version.mjs "$BUMP" "$RELEASE_TYPE" "$PRERELEASE_IDENTIFIER")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$([[ "$version" == *-* ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize the release and check for blockers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUMP: ${{ inputs.version_bump }}
+          RELEASE_TYPE: ${{ inputs.release_type }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          VERSION: ${{ steps.next.outputs.version }}
+          TAG: ${{ steps.next.outputs.tag }}
+          PRERELEASE: ${{ steps.next.outputs.prerelease }}
+        run: scripts/release/plan.sh
+
+  version:
+    name: Commit and tag ${{ needs.plan.outputs.tag }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The approval gate: give this environment required reviewers so the run waits
+    # here until someone has checked the plan summary and approved it.
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Bump version
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          # GitHub's documented identity for the github-actions[bot] account
+          # (41898282 is its user id), so the commit shows up as made by the bot.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Sets the approved version in package.json + package-lock.json, commits it,
+          # and creates the annotated tag.
+          npm version "$VERSION" -m "chore(release): v%s"
+
+      - name: Push release commit and tag
+        if: ${{ !inputs.dry_run }}
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+          BRANCH: ${{ github.ref_name }}
+        # Atomic: either both land or neither does. It also fails if the branch moved
+        # since the plan, so only the commit that was reviewed gets released.
+        run: git push --atomic origin "HEAD:refs/heads/${BRANCH}" "refs/tags/${TAG}"
+
+  package:
+    name: Build and release ${{ needs.plan.outputs.tag }}
+    needs: [plan, version]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # create the GitHub Release and upload its files
+    steps:
+      - name: Check out ${{ needs.plan.outputs.tag }}
+        uses: actions/checkout@v7
+        with:
+          # In a dry run the tag was never pushed; use the commit being released.
+          ref: ${{ inputs.dry_run && github.sha || needs.plan.outputs.tag }}
+
+      - name: Install build tools
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends $APT_PACKAGES
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Apply the bumped version (dry run only)
+        if: ${{ inputs.dry_run }}
+        run: npm version "${{ needs.plan.outputs.version }}" --no-git-tag-version
+
+      - name: Render the app icon
+        run: |
+          mkdir -p build/icons
+          rsvg-convert --width 512 --height 512 assets/icon.svg --output build/icons/512x512.png
+
+      # Builds the native helper and the electron-vite bundles, then packages them
+      # with electron-builder (electron-builder.yml) into dist/.
+      - name: Build production app
+        run: npm run dist
+
+      - name: Collect release files
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: scripts/release/collect-files.sh
+
+      # Always kept on the run (dry runs included), so the build can be tried before release.
+      - name: Upload build as a workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: clickered-${{ needs.plan.outputs.version }}
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      # On a re-run after a failed upload, replaces the files on the existing release.
+      - name: Create GitHub Release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+        run: scripts/release/publish.sh

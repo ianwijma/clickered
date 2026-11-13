@@ -1,6 +1,6 @@
 {
   "name": "clickered",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Replicate clicks, drags and keys from one window to a group of windows (X11).",
   "private": true,
   "author": {

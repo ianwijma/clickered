@@ -17,6 +17,7 @@
     "start": "npm run build && electron .",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
+    "test:e2e": "docker build -t clickered-e2e -f e2e/Dockerfile . && docker run --rm --init --shm-size=512m clickered-e2e",
     "dist": "npm run build && electron-builder --linux --publish never"
   },
   "dependencies": {
@@ -28,6 +29,7 @@
     "electron": "^45.3.1",
     "electron-builder": "^26.18.0",
     "electron-vite": "^6.0.0",
+    "playwright-core": "^1.65.0",
     "semver": "^7.8.6",
     "tailwindcss": "^4.3.5",
     "typescript": "^7.0.2",

@@ -8,6 +8,8 @@
 //      FAKE_PICK                comma-separated window ids answered to successive `pick`s (then 0)
 //      FAKE_SEQ_DELAY           ms before answering a seq (default 5)
 //      FAKE_SEQ_HANG=1          never answer a seq until `abort`
+//      FAKE_ESC_ON_SEQ          ms into a seq: emit `esc` then `done ok:false` in one write
+//                               (a physical Escape aborting the replay, like the real helper)
 //      FAKE_EXIT_AFTER          exit(3) after this many ms
 //      FAKE_IGNORE_EOF=1        keep running after stdin closes (tests SIGKILL fallback)
 import { appendFileSync } from "node:fs"
@@ -39,7 +41,15 @@ createInterface({ input: process.stdin })
     else if (cmd === "pickcancel") out({ t: "picked", win: 0 })
     else if (cmd === "seq") {
       const id = Number(arg)
-      if (process.env.FAKE_SEQ_HANG === "1") hanging = id
+      if (process.env.FAKE_ESC_ON_SEQ)
+        setTimeout(
+          () =>
+            process.stdout.write(
+              JSON.stringify({ t: "esc", time: 1 }) + "\n" + JSON.stringify({ t: "done", id, ok: false }) + "\n",
+            ),
+          Number(process.env.FAKE_ESC_ON_SEQ),
+        )
+      else if (process.env.FAKE_SEQ_HANG === "1") hanging = id
       else setTimeout(() => out({ t: "done", id, ok: true }), Number(process.env.FAKE_SEQ_DELAY ?? 5))
     } else if (cmd === "abort" && hanging !== null) {
       out({ t: "done", id: hanging, ok: false })

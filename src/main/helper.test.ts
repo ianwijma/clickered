@@ -70,6 +70,20 @@ describe("spawnHelper (fake helper)", () => {
     expect(fake.log()).toContain("abort")
   })
 
+  it("fails a seq with SeqEscaped when Escape aborted it", async () => {
+    const fake = fakeHelper({ FAKE_ESC_ON_SEQ: "20" })
+    const exit = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const h = yield* spawnHelper(fake.opts)
+          return yield* Effect.exit(h.runSeq([{ op: "s", ms: 1 }], 5000))
+        }),
+      ),
+    )
+    expect(Exit.isFailure(exit)).toBe(true)
+    expect(JSON.stringify(exit)).toContain("SeqEscaped")
+  })
+
   it("fails pending seqs with HelperGone when the process exits", async () => {
     const fake = fakeHelper({ FAKE_SEQ_HANG: "1", FAKE_EXIT_AFTER: "100" })
     const out = await Effect.runPromise(

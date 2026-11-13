@@ -9,7 +9,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest"
 import type { AppState } from "@shared/ipc"
 import { ConfigStore, DEFAULT_CONFIG } from "../src/main/config"
 import { startEngine, type Engine } from "../src/main/engine"
-import { B_FREE, HELPER, assertSandbox, inA, phys, pointer, sleep, startFakeWm, waitFor, type FakeWm } from "./support/x11"
+import { B_FREE, HELPER, assertSandbox, inA, phys, pointer, sleep, startFakeWm, waitFor, waitForPickGrab, type FakeWm } from "./support/x11"
 
 const ESCAPE = 9
 
@@ -93,14 +93,19 @@ describe("engine e2e (real helper, Xvfb)", () => {
     engine.command({ c: "setEnabled", enabled: false })
     await waitFor(() => !engine.getState().enabled, "paused")
     phys.click(...inA(0.5, 0.5))
-    // C is not in the group.
-    phys.click(850, 200)
     await sleep(500)
     expect(wm.on("B", "press")).toHaveLength(0)
     expect(wm.on("A", "press")).toHaveLength(1)
 
     engine.command({ c: "setEnabled", enabled: true })
     await waitFor(() => engine.getState().enabled, "live")
+    // Live, but C is not in the group: it gets the click, nobody else does.
+    phys.click(850, 200)
+    await sleep(500)
+    expect(wm.on("C", "press")).toHaveLength(1)
+    expect(wm.on("A", "press")).toHaveLength(1)
+    expect(wm.on("B", "press")).toHaveLength(0)
+
     phys.click(...inA(0.25, 0.25))
     await waitFor(() => wm.on("B", "press").length === 1, "replay after resume")
   })
@@ -118,11 +123,11 @@ describe("engine e2e (real helper, Xvfb)", () => {
     const { engine } = await start([])
     engine.command({ c: "startPick" })
     await waitFor(() => engine.getState().picking, "picking")
-    await sleep(150)
     // Picking clicks are swallowed by the helper's grab.
+    await waitForPickGrab(wm, B_FREE)
     phys.click(...B_FREE)
     await waitFor(() => engine.getState().windows.length === 1, "B picked")
-    await sleep(150)
+    await waitForPickGrab(wm, inA(0.5, 0.5))
     phys.click(...inA(0.5, 0.5))
     await waitFor(() => engine.getState().windows.length === 2, "A picked")
     engine.command({ c: "cancelPick" })

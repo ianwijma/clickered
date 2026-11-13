@@ -7,7 +7,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { _electron, type ElectronApplication, type Page } from "playwright-core"
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest"
-import { B_FREE, HELPER, ROOT, assertSandbox, inA, phys, sleep, startFakeWm, waitFor, type FakeWm } from "./support/x11"
+import { B_FREE, HELPER, ROOT, assertSandbox, inA, phys, sleep, startFakeWm, waitFor, waitForPickGrab, type FakeWm } from "./support/x11"
 
 let wm: FakeWm
 let app: ElectronApplication | null = null
@@ -46,12 +46,12 @@ describe("app e2e (Electron, real helper, Xvfb)", () => {
     await grab.waitFor({ state: "visible", timeout: 15_000 })
     await grab.click()
     await page.getByText("Click each window…").waitFor()
-    await sleep(200)
 
     // Pick A (becomes the source), then B, then finish with Done.
+    await waitForPickGrab(wm, inA(0.5, 0.5))
     phys.click(...inA(0.5, 0.5))
     await page.getByText("1 selected · click more").waitFor()
-    await sleep(150)
+    await waitForPickGrab(wm, B_FREE)
     phys.click(...B_FREE)
     await page.getByText("2 selected · click more").waitFor()
     await page.getByRole("button", { name: /Finish picking/ }).click()

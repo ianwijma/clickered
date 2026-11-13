@@ -3,6 +3,7 @@
  * anywhere but the throwaway Xvfb inside the e2e Docker image (`npm run test:e2e`).
  */
 import { execFileSync, spawn, type ChildProcess } from "node:child_process"
+import { existsSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { createInterface } from "node:readline"
 
@@ -10,10 +11,12 @@ export const ROOT = resolve(import.meta.dirname, "..", "..")
 export const HELPER = process.env["HELPER"] ?? join(ROOT, "resources", "clickered-helper")
 const PHYSINPUT = process.env["PHYSINPUT"] ?? "/usr/local/bin/physinput"
 
-/** Throws unless we are inside the e2e container with an Xvfb display. */
+/** The private Xvfb display that e2e/run.sh starts inside the container. */
+export const E2E_DISPLAY = ":99"
+
+/** Throws unless we are inside the e2e container on its private Xvfb. */
 export const assertSandbox = (): void => {
-  const display = process.env["DISPLAY"] ?? ""
-  if (process.env["CLICKERED_E2E"] !== "1" || display === "" || display === ":0" || display === ":1") {
+  if (process.env["CLICKERED_E2E"] !== "1" || process.env["DISPLAY"] !== E2E_DISPLAY || !existsSync("/.dockerenv")) {
     throw new Error(
       "E2E tests inject real input into an X server. Run them with `npm run test:e2e` (Docker + Xvfb), not on your desktop.",
     )
@@ -126,3 +129,20 @@ export const inA = (fx: number, fy: number): [number, number] => [Math.round(4 +
 export const inB = (fx: number, fy: number): [number, number] => [Math.round(650 + fx * 400), Math.round(fy * 300)]
 /** A point in B that neither C nor the clickered bar (top centre) covers. */
 export const B_FREE: [number, number] = [1030, 280]
+
+/**
+ * Wait until the helper's pick grab is active. The grab only selects button events, so
+ * while it is held the fake WM's windows stop receiving pointer motion: nudge the pointer
+ * around `at` until a move produces no motion event. (The protocol has no "grabbed" ack.)
+ */
+export const waitForPickGrab = async (wm: FakeWm, at: [number, number], ms = 5000): Promise<void> => {
+  const end = Date.now() + ms
+  for (let i = 0; Date.now() < end; i++) {
+    const before = wm.on("A", "motion").length + wm.on("B", "motion").length + wm.on("C", "motion").length
+    xdotool("mousemove", String(at[0] + (i % 2)), String(at[1]))
+    await sleep(100)
+    const after = wm.on("A", "motion").length + wm.on("B", "motion").length + wm.on("C", "motion").length
+    if (after === before) return
+  }
+  throw new Error("timed out waiting for the pick grab")
+}

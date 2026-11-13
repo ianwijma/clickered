@@ -2,6 +2,10 @@
 
 # clickered
 
+[![Unit tests](https://github.com/ianwijma/clickered/actions/workflows/unit.yml/badge.svg)](https://github.com/ianwijma/clickered/actions/workflows/unit.yml)
+[![E2E tests](https://github.com/ianwijma/clickered/actions/workflows/e2e.yml/badge.svg)](https://github.com/ianwijma/clickered/actions/workflows/e2e.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Created in [T3 Code](https://t3.codes).
 
 Replicate clicks and drags from one window into a group of other windows.
@@ -47,3 +51,12 @@ container, so your real desktop is never touched:
 
 The E2E suites refuse to run outside the container. Pass a filter through to vitest with
 `docker run --rm --init --shm-size=512m -e SKIP_NATIVE=1 clickered-e2e -t Escape` after a build.
+
+## Contributing
+
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). Please report
+security issues privately as described in [SECURITY.md](SECURITY.md).
+
+## License
+
+[MIT](LICENSE) © Ian Wijma

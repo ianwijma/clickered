@@ -2,12 +2,29 @@
   "name": "clickered",
   "version": "0.2.0",
   "description": "Replicate clicks, drags and keys from one window to a group of windows (X11).",
+  "license": "MIT",
   "private": true,
   "author": {
     "name": "Ian Wijma",
     "email": "ian@wij.ma"
   },
   "homepage": "https://github.com/ianwijma/clickered",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ianwijma/clickered.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ianwijma/clickered/issues"
+  },
+  "keywords": [
+    "x11",
+    "linux",
+    "electron",
+    "multiboxing",
+    "input",
+    "automation",
+    "xtest"
+  ],
   "desktopName": "clickered.desktop",
   "main": "./out/main/index.js",
   "scripts": {

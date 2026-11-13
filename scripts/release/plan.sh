@@ -15,17 +15,43 @@ summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 
 name="$(node -p "require('./package.json').name")"
 current="$(node -p "require('./package.json').version")"
-# `gh release view` without a tag is the release marked latest (never a prerelease).
-gh_latest="$(gh release view --json tagName --jq .tagName 2>/dev/null || echo none)"
-gh_newest="$(gh release list --limit 1 --json tagName --jq '.[0].tagName // "none"' 2>/dev/null || echo none)"
+# The lookups below tell "not there" apart from a failed query (network, auth,
+# API errors): a failed query stops the plan, so it never reports a blocker as absent.
+
+# Prints the tag of a release, or "none" when there is no such release.
+# Without arguments: the release marked latest (never a prerelease or draft).
+release_tag() {
+  local out
+  if out="$(gh release view "$@" --json tagName --jq .tagName 2>&1)"; then
+    echo "$out"
+  elif [[ "$out" == "release not found" ]]; then
+    echo none
+  else
+    echo "::error::Could not look up GitHub Releases: ${out}" >&2
+    return 1
+  fi
+}
+
+gh_latest="$(release_tag)"
+gh_newest="$(gh release list --limit 1 --json tagName --jq '.[0].tagName // "none"')"
+# Local only: fails when no `v*` tag exists yet.
 last_tag="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo none)"
+gh_release="$(release_tag "$TAG")"
+
+# --exit-code: 0 = the tag exists, 2 = it does not, anything else = the query failed.
+tag_status=0
+git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null || tag_status=$?
+if (( tag_status != 0 && tag_status != 2 )); then
+  echo "::error::Could not check the remote for the tag ${TAG} (git ls-remote exit ${tag_status})."
+  exit 1
+fi
 
 # Each check is a blocker: the run stops here and nothing is pushed or released.
 blockers=()
-if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null; then
+if (( tag_status == 0 )); then
   blockers+=("The tag \`${TAG}\` already exists.")
 fi
-if gh release view "$TAG" >/dev/null 2>&1; then
+if [[ "$gh_release" != none ]]; then
   blockers+=("A GitHub Release for \`${TAG}\` already exists.")
 fi
 if [[ "$PRERELEASE" != "true" && "$gh_latest" != "none" ]] \

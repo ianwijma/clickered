@@ -73,7 +73,9 @@ to try a build before releasing it.
 
 - **Build and release failed:** click **Re-run failed jobs**. It builds the tag
   that was already pushed, without bumping again. If the release was already
-  created, its files are replaced.
+  created, its files are replaced, and a release left as a draft is published.
+- **Plan failed with "Could not look up" or "Could not check":** GitHub or the
+  remote couldn't be queried, so the blockers weren't checked. Run it again later.
 - **"may not run releases":** only the repository owner can release, unless the
   `RELEASE_ACTORS` repository variable lists your GitHub login.
 

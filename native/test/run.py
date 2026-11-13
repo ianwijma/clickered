@@ -146,6 +146,35 @@ check([(e["ev"], e["win"], e["x"], e["y"]) for e in ev] ==
       "click at fraction (0.5,0.25) of A content: %r" % ev)
 check(not [m for m in got if m["t"] in ("btn", "motion")], "own injection not reported")
 
+# --- a window the WM refuses to activate gets no input (C covers centre of B)
+from Xlib import X as XX, Xatom, display as xdisplay  # noqa: E402
+
+xd = xdisplay.Display()
+xroot = xd.screen().root
+REFUSE = xd.intern_atom("_FAKEWM_REFUSE")
+xroot.change_property(REFUSE, Xatom.WINDOW, 32, [B])
+xd.sync()
+wmr.lines(0.2)
+send(h, "seq 20 m %d 0.5 0.5;d 1;u 1" % B)
+_, done = hr.until(lambda m: m["t"] == "done")
+ev = wmr.lines(0.5)
+check(done == {"t": "done", "id": 20, "ok": False} and {"ev": "refuse", "win": "B"} in ev
+      and not [e for e in ev if e["ev"] in ("press", "release")],
+      "refused activation: no click injected: %r" % ev)
+send(h, "seq 21 f %d;kd 38;ku 38" % B)
+_, done = hr.until(lambda m: m["t"] == "done")
+ev = wmr.lines(0.5)
+check(done == {"t": "done", "id": 21, "ok": False} and {"ev": "refuse", "win": "B"} in ev
+      and not [e for e in ev if e["ev"] in ("kpress", "krelease")],
+      "refused activation: no key injected: %r" % ev)
+check(buttons_down() == 0, "refused activation: no stuck button")
+xroot.delete_property(REFUSE)
+# The helper's own XRaiseWindow lifted B; put C back on top for the next test.
+xd.create_resource_object("window", C).configure(stack_mode=XX.Above)
+xroot.change_property(xd.intern_atom("_NET_ACTIVE_WINDOW"), Xatom.WINDOW, 32, [C])
+xd.sync()
+wmr.lines(0.2)
+
 # --- covered window gets raised (C covers centre of B)
 send(h, "seq 2 m %d 0.5 0.5;d 1;u 1" % B)
 _, done = hr.until(lambda m: m["t"] == "done")
@@ -203,6 +232,12 @@ send(h, "bogus")
 send(h, "seq 9 m 1 2;d 1")
 got, _ = hr.until(lambda m: m["t"] == "done")
 check([m["t"] for m in got] == ["error", "error", "done"] and not got[-1]["ok"], "bad command / bad op")
+send(h, "seq 10 m %d 1e300 0;d 1" % A)
+got, _ = hr.until(lambda m: m["t"] == "done")
+check([m["t"] for m in got] == ["error", "done"] and not got[-1]["ok"], "out-of-range fraction rejected")
+send(h, "seq 11 w 99999 0")
+got, _ = hr.until(lambda m: m["t"] == "done")
+check([m["t"] for m in got] == ["error", "done"] and not got[-1]["ok"], "out-of-range warp rejected")
 
 # --- windows debounce on _NET_CLIENT_LIST change
 def set_clients(ids):

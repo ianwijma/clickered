@@ -100,6 +100,12 @@ describe("drag", () => {
     expect(enc(ops)).toContain("m 8 0.16000 0.10000;s 200;m 8 0.16000 0.10000;u 1")
   })
 
+  it("keeps a long hold between the press and the first motion", () => {
+    const held: Gesture = { kind: "press", source: 7, button: 1, points: [pt(100, 100, 1000), pt(160, 100, 3000)] }
+    expect(enc(buildScript(held, [8], opts))).toContain("d 1;s 2000;m 8 0.16000 0.10000;u 1")
+    expect(enc(buildScript(held, [8], { timing: T, dragSpeed: 2 }))).toContain("d 1;s 1000;m 8")
+  })
+
   it("repeats the whole drag per target", () => {
     const enc2 = enc(buildScript(g, [8, 9], opts))
     expect(enc2.match(/d 1/g)).toHaveLength(2)

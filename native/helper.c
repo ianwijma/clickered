@@ -7,7 +7,8 @@
  *   stderr: diagnostics
  *
  * Single-threaded, one Display connection. Everything is driven by poll() on
- * stdin and the X connection fd; sleeps inside a `seq` keep servicing both.
+ * stdin, the X connection fd and a signal self-pipe; sleeps inside a `seq` keep
+ * servicing them.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -37,6 +38,10 @@
 #define POST_SEQ_SUPPRESS_MS 30
 #define WINDOWS_DEBOUNCE_MS 100
 #define ACTIVATE_WAIT_MS 200
+#define POINTER_SETTLE_MS 100
+/* Bounds for seq coordinates: fractions may leave the window (drags), but not absurdly. */
+#define FRAC_LIMIT 100.0
+#define COORD_LIMIT 32767L
 #define PICK_RELEASE_TIMEOUT_MS 3000
 
 /* ------------------------------------------------------------------------ */
@@ -50,6 +55,8 @@ static int xi_opcode;
 static Atom A_CLIENT_LIST, A_ACTIVE, A_NET_WM_NAME, A_UTF8, A_PID;
 
 static volatile sig_atomic_t exit_requested;
+/* Self-pipe: the signal handler writes a byte so a blocking poll() wakes up. */
+static int sig_pipe[2] = {-1, -1};
 static int stdin_eof;
 
 /* XTEST slave device ids (filtered out of capture). */
@@ -440,7 +447,7 @@ static void b_title(Buf *b, Window w)
     int fmt;
     unsigned long n = 0;
     unsigned char *d = get_prop(w, A_NET_WM_NAME, A_UTF8, &type, &fmt, &n);
-    if (d && fmt == 8) {
+    if (d && fmt == 8 && n > 0) {
         b_jstr(b, (char *)d, n);
         XFree(d);
         return;
@@ -910,6 +917,27 @@ static void read_stdin(void)
 /* ------------------------------------------------------------------------ */
 /* Waiting (non-blocking sleep)                                              */
 
+/*
+ * poll() stdin, the X connection and the signal pipe. Returns -1/0 like poll(), else a
+ * positive value with bit 0 set when stdin is readable (or hung up). Drains the pipe.
+ */
+static int wait_io(int timeout_ms)
+{
+    struct pollfd p[3] = {
+        {STDIN_FILENO, POLLIN, 0},
+        {ConnectionNumber(dpy), POLLIN, 0},
+        {sig_pipe[0], POLLIN, 0},
+    };
+    int r = poll(p, sig_pipe[0] >= 0 ? 3 : 2, timeout_ms);
+    if (r <= 0) return r;
+    if (sig_pipe[0] >= 0 && (p[2].revents & POLLIN)) {
+        char junk[16];
+        while (read(sig_pipe[0], junk, sizeof junk) > 0) {
+        }
+    }
+    return 2 | ((p[0].revents & (POLLIN | POLLHUP | POLLERR)) ? 1 : 0);
+}
+
 static int seq_interrupted(void)
 {
     return abort_flag || stdin_eof || exit_requested;
@@ -933,12 +961,8 @@ static int seq_wait(long long ms, Window wait_active)
             continue; /* re-pump: get_active may have queued events */
         }
         long long left = deadline - now_ms();
-        struct pollfd p[2] = {
-            {STDIN_FILENO, POLLIN, 0},
-            {ConnectionNumber(dpy), POLLIN, 0},
-        };
-        int r = poll(p, 2, left > 0 ? next_timeout(left) : 0);
-        if (r > 0 && (p[0].revents & (POLLIN | POLLHUP | POLLERR))) read_stdin();
+        int r = wait_io(left > 0 ? next_timeout(left) : 0);
+        if (r > 0 && (r & 1)) read_stdin();
         if (left <= 0) {
             pump_x();
             return !seq_interrupted();
@@ -995,7 +1019,10 @@ static void release_all(void)
     if (any) inject_flush();
 }
 
-/* Activate + raise; wait (bounded) until it is the active window. 0 = interrupted. */
+/*
+ * Activate + raise; wait (bounded) until it is the active window. Returns 1 only if w is
+ * the active window afterwards; 0 if the WM refused or was too slow, or on interrupt.
+ */
 static int activate(Window w)
 {
     XEvent e;
@@ -1012,7 +1039,19 @@ static int activate(Window w)
     XRaiseWindow(dpy, w);
     XSync(dpy, False);
     if (get_active() == w) return 1;
-    return seq_wait(ACTIVATE_WAIT_MS, w);
+    if (!seq_wait(ACTIVATE_WAIT_MS, w)) return 0;
+    return get_active() == w;
+}
+
+/* Wait (bounded) until the client under the pointer is w, e.g. while the WM restacks. */
+static int pointer_on(Window w)
+{
+    long long deadline = now_ms() + POINTER_SETTLE_MS;
+    for (;;) {
+        if (client_under_pointer(NULL, NULL) == w) return 1;
+        if (now_ms() >= deadline) return 0;
+        if (!seq_wait(10, 0)) return 0;
+    }
 }
 
 static int frac_to_px(double f, int origin, int size)
@@ -1065,7 +1104,7 @@ static int parse_ops(char *s, Op **out_ops, size_t *out_n, char *err, size_t err
     do {                                                 \
         errno = 0;                                       \
         (dst) = strtod(tok[i], &end);                    \
-        if (errno || *end || end == tok[i] || !isfinite(dst)) ok = 0; \
+        if (errno || *end || end == tok[i] || !isfinite(dst) || fabs(dst) > FRAC_LIMIT) ok = 0; \
     } while (0)
         if (nt >= 1 && strcmp(tok[0], "f") == 0 && nt == 2) {
             o.op = 'f';
@@ -1092,6 +1131,7 @@ static int parse_ops(char *s, Op **out_ops, size_t *out_n, char *err, size_t err
             o.op = 'w';
             NUML(1, o.a);
             NUML(2, o.b);
+            if (labs(o.a) > COORD_LIMIT || labs(o.b) > COORD_LIMIT) ok = 0;
         } else {
             ok = 0;
         }
@@ -1185,9 +1225,15 @@ static void run_seq(char *args)
                 break;
             }
             skip = 0;
-            any_ok = 1;
             if (o->op == 'f') {
-                activate(w);
+                /* Never type into a window that did not actually get focus. */
+                if (!activate(w)) {
+                    release_all();
+                    skip = 1;
+                    skipwin = w;
+                    break;
+                }
+                any_ok = 1;
                 break;
             }
             Rect r;
@@ -1199,10 +1245,20 @@ static void run_seq(char *args)
             }
             warp(frac_to_px(o->fx, r.x, r.w), frac_to_px(o->fy, r.y, r.h));
             if (!any_btn_held() && client_under_pointer(NULL, NULL) != w) {
-                if (!activate(w)) break;
-                if (content_rect(w, &r))
+                /* Something covers w: raise it, and never click into whatever is on top. */
+                int ok = activate(w) && content_rect(w, &r);
+                if (ok) {
                     warp(frac_to_px(o->fx, r.x, r.w), frac_to_px(o->fy, r.y, r.h));
+                    ok = pointer_on(w);
+                }
+                if (!ok) {
+                    release_all();
+                    skip = 1;
+                    skipwin = w;
+                    break;
+                }
             }
+            any_ok = 1;
             break;
         }
         case 'd':
@@ -1275,7 +1331,13 @@ static void exec_line(char *line)
 static void on_signal(int sig)
 {
     (void)sig;
+    int saved = errno;
     exit_requested = 1;
+    if (sig_pipe[1] >= 0) {
+        ssize_t ignored = write(sig_pipe[1], "x", 1);
+        (void)ignored;
+    }
+    errno = saved;
 }
 
 static void shutdown_and_exit(int code)
@@ -1289,6 +1351,15 @@ static void shutdown_and_exit(int code)
 
 int main(void)
 {
+    if (pipe(sig_pipe) == 0) {
+        for (int i = 0; i < 2; i++) {
+            int f = fcntl(sig_pipe[i], F_GETFL);
+            if (f >= 0) fcntl(sig_pipe[i], F_SETFL, f | O_NONBLOCK);
+            fcntl(sig_pipe[i], F_SETFD, FD_CLOEXEC);
+        }
+    } else {
+        sig_pipe[0] = sig_pipe[1] = -1;
+    }
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = on_signal;
@@ -1368,11 +1439,7 @@ int main(void)
         service_timers();
         pump_x();
         if (q_head) continue;
-        struct pollfd p[2] = {
-            {STDIN_FILENO, POLLIN, 0},
-            {ConnectionNumber(dpy), POLLIN, 0},
-        };
-        int r = poll(p, 2, next_timeout(-1));
-        if (r > 0 && (p[0].revents & (POLLIN | POLLHUP | POLLERR))) read_stdin();
+        int r = wait_io(next_timeout(-1));
+        if (r > 0 && (r & 1)) read_stdin();
     }
 }

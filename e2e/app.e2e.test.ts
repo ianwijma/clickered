@@ -76,7 +76,14 @@ describe("app e2e (Electron, real helper, Xvfb)", () => {
     // Quit from the panel: the app exits.
     const closed = new Promise<void>((r) => app!.process().once("exit", () => r()))
     await page.getByRole("button", { name: "Windows & settings" }).click()
-    await page.getByRole("button", { name: "Quit clickered" }).click()
+    // The app can exit before Playwright finishes the click, which rejects with "Target page,
+    // context or browser has been closed". That's the outcome we want; `closed` is the assertion.
+    await page
+      .getByRole("button", { name: "Quit clickered" })
+      .click()
+      .catch((e: unknown) => {
+        if (!/has been closed/.test(String(e))) throw e
+      })
     await closed
     app = null
   })

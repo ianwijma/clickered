@@ -153,8 +153,9 @@ export const clickOps = (target: WindowId, button: number, at: Point, t: Timing)
 
 /**
  * Drag replay for one target. `path` must already be resampled. Between consecutive
- * points the original delta divided by `speed` is slept — including the pause between
- * the last motion and the release, which governs fling inertia.
+ * points the original delta divided by `speed` is slept — including the hold between the
+ * press and the first motion, and the pause between the last motion and the release, which
+ * governs fling inertia.
  */
 export const dragOps = (
   target: WindowId,
@@ -165,7 +166,11 @@ export const dragOps = (
 ): SeqOp[] => {
   const p0 = path[0]
   if (!p0) return []
-  const ops: SeqOp[] = [m(target, p0), s(t.dragMoveSettle), { op: "d", button }, s(t.dragPressSettle)]
+  // Hold after the press for the recorded press-to-first-motion delay (at least the settle),
+  // so a long press before moving is preserved.
+  const p1 = path[1]
+  const hold = p1 ? Math.max(t.dragPressSettle, (p1.time - p0.time) / speed) : t.dragPressSettle
+  const ops: SeqOp[] = [m(target, p0), s(t.dragMoveSettle), { op: "d", button }, s(hold)]
   for (let i = 1; i < path.length; i++) {
     const p = path[i]!
     ops.push(m(target, p))

@@ -4,3 +4,12 @@ dist
 resources/clickered-helper
 *.log
 build/icons
+
+# Local secrets and credentials (never commit these)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+.npmrc

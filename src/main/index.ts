@@ -5,7 +5,8 @@
 import { join } from "node:path"
 import { app, BrowserWindow, globalShortcut, ipcMain, screen } from "electron"
 import { Effect } from "effect"
-import { IPC, type IpcCommand } from "@shared/ipc"
+import { IPC } from "@shared/ipc"
+import { parseCommand } from "./command"
 import { ConfigStore, loadConfig, type BarPosition } from "./config"
 import { startEngine, type Engine } from "./engine"
 
@@ -45,9 +46,6 @@ function defaultPosition(size: { width: number; height: number }): BarPosition {
   return { x: Math.round(a.x + (a.width - size.width) / 2), y: a.y + 8 }
 }
 
-const isCommand = (u: unknown): u is IpcCommand =>
-  typeof u === "object" && u !== null && typeof (u as { c?: unknown }).c === "string"
-
 function main(): void {
   let win: BrowserWindow | null = null
   let engine: Engine | null = null
@@ -77,9 +75,13 @@ function main(): void {
       webPreferences: {
         preload: join(__dirname, "../preload/index.js"),
         contextIsolation: true,
-        sandbox: false,
+        nodeIntegration: false,
+        sandbox: true,
       },
     })
+    // The bar never opens other windows or navigates away from its own page.
+    w.webContents.setWindowOpenHandler(() => ({ action: "deny" }))
+    w.webContents.on("will-navigate", (e) => e.preventDefault())
     w.setAlwaysOnTop(true, "screen-saver")
     w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
     w.once("ready-to-show", () => w.showInactive())
@@ -110,9 +112,15 @@ function main(): void {
 
   app.on("second-instance", () => win?.showInactive())
 
-  ipcMain.handle(IPC.getState, () => engine?.getState() ?? null)
-  ipcMain.on(IPC.command, (_e, cmd: unknown) => {
-    if (!isCommand(cmd)) return
+  // Only the bar window's own top-level page may talk to main.
+  const fromBar = (e: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent): boolean =>
+    win !== null && !win.isDestroyed() && e.sender === win.webContents && e.senderFrame === win.webContents.mainFrame
+
+  ipcMain.handle(IPC.getState, (e) => (fromBar(e) ? (engine?.getState() ?? null) : null))
+  ipcMain.on(IPC.command, (e, raw: unknown) => {
+    if (!fromBar(e)) return
+    const cmd = parseCommand(raw)
+    if (!cmd) return
     switch (cmd.c) {
       case "setSize":
         return setSize(cmd.width, cmd.height)

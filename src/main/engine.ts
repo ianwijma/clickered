@@ -229,6 +229,7 @@ export const startEngine = (opts: EngineOptions): Engine => {
           Effect.catchTags({
             SeqTimeout: (e) => log(`seq ${e.id} timed out after ${e.ms} ms`),
             HelperGone: (e) => log(`seq lost: ${e.message}`),
+            SeqEscaped: () => pauseOnEscape,
           }),
           Effect.asVoid,
           Effect.ensuring(update((s) => ({ ...s, busy: false }))),
@@ -442,10 +443,11 @@ export const startEngine = (opts: EngineOptions): Engine => {
         case "esc":
           // Panic key. Only acts when a replay is running or queued: stop it and pause, so
           // nothing else gets replicated until the user switches back to Live.
+          // (A replay that the helper already aborted may have finished by now; runSeq
+          // reports that case as SeqEscaped.)
           return Effect.gen(function* () {
             if (!get().busy && waiting.length === 0) return
-            yield* log("Escape pressed during replay: stopping and pausing")
-            yield* setEnabled(false)
+            yield* pauseOnEscape
           })
         case "done":
           return Effect.void
@@ -496,6 +498,12 @@ export const startEngine = (opts: EngineOptions): Engine => {
         }
         yield* update((s) => ({ ...s, enabled: on }))
       })
+
+    /** Escape during a replay: drop the queue and switch to Paused (once). */
+    const pauseOnEscape: Effect.Effect<void> = Effect.suspend(() => {
+      if (!get().enabled) return Effect.void
+      return log("Escape pressed during replay: stopping and pausing").pipe(Effect.andThen(setEnabled(false)))
+    })
 
     const command = (cmd: IpcCommand): Effect.Effect<void> => {
       switch (cmd.c) {

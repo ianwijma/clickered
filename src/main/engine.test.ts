@@ -210,6 +210,17 @@ describe("engine (fake helper)", () => {
     await waitFor(() => fake.log().includes("abort") && !engine.getState().busy)
   })
 
+  it("pauses when Escape aborts a replay, even if the done arrives right behind the esc", async () => {
+    const { engine } = setup({
+      env: { FAKE_ESC_ON_SEQ: "30" },
+      events: [btn(true, 1, 20, 0.5, 0.5, 1020, 700, 1000), btn(false, 1, 20, 0.5, 0.5, 1020, 700, 1010)],
+    })
+    await waitFor(() => engine.getState().busy)
+    await waitFor(() => !engine.getState().busy)
+    await sleep(50)
+    expect(engine.getState().enabled).toBe(false)
+  })
+
   it("surfaces a missing helper as an error", async () => {
     const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "clickered-cfg-")), "c.json"), DEFAULT_CONFIG)
     const engine = startEngine({ config: store, helper: { command: "/nonexistent/helper" }, onState: () => {} })

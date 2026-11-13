@@ -14,6 +14,8 @@ import { encodeCommand, type HelperCommand, type HelperMessage, type SeqOp } fro
 export class HelperSpawnError extends Data.TaggedError("HelperSpawnError")<{ readonly message: string }> {}
 export class HelperGone extends Data.TaggedError("HelperGone")<{ readonly message: string }> {}
 export class SeqTimeout extends Data.TaggedError("SeqTimeout")<{ readonly id: number; readonly ms: number }> {}
+/** The user pressed Escape while the seq ran (the helper aborted it). */
+export class SeqEscaped extends Data.TaggedError("SeqEscaped")<{ readonly id: number }> {}
 
 export interface Helper {
   /** Every parsed stdout message, in order (`done` messages included). */
@@ -22,8 +24,14 @@ export interface Helper {
   readonly send: (cmd: HelperCommand) => Effect.Effect<void>
   /**
    * Run a `seq` and wait for its `done` (true = ok). On timeout an `abort` is sent.
+   * Fails with `SeqEscaped` when a physical Escape arrived while it ran. (Decided here,
+   * in stdout order: the `esc` line always precedes the `done` it caused, but a consumer
+   * of `messages` may only see the `esc` after this effect has already completed.)
    */
-  readonly runSeq: (ops: ReadonlyArray<SeqOp>, timeoutMs: number) => Effect.Effect<boolean, HelperGone | SeqTimeout>
+  readonly runSeq: (
+    ops: ReadonlyArray<SeqOp>,
+    timeoutMs: number,
+  ) => Effect.Effect<boolean, HelperGone | SeqTimeout | SeqEscaped>
   /** Completes with a human-readable reason when the process exits. */
   readonly exited: Effect.Effect<string>
   readonly pid: number | undefined
@@ -72,7 +80,9 @@ export const spawnHelper = (opts: HelperSpawnOptions): Effect.Effect<Helper, Hel
 
     const messages = yield* Queue.unbounded<HelperMessage>()
     const exitedD = yield* Deferred.make<string>()
-    const pending = new Map<number, Deferred.Deferred<boolean, HelperGone>>()
+    const pending = new Map<number, Deferred.Deferred<boolean, HelperGone | SeqEscaped>>()
+    /** Pending seq ids that saw an `esc` line before their `done`. */
+    const escaped = new Set<number>()
     let nextId = 1
     let alive = true
 
@@ -115,11 +125,13 @@ export const spawnHelper = (opts: HelperSpawnOptions): Effect.Effect<Helper, Hel
     createInterface({ input: child.stdout }).on("line", (line) => {
       const msg = parseHelperLine(line)
       if (!msg) return
+      if (msg.t === "esc") for (const id of pending.keys()) escaped.add(id)
       if (msg.t === "done") {
         const d = pending.get(msg.id)
         if (d) {
           pending.delete(msg.id)
-          Deferred.doneUnsafe(d, Exit.succeed(msg.ok))
+          const esc = escaped.delete(msg.id)
+          Deferred.doneUnsafe(d, esc ? Exit.fail(new SeqEscaped({ id: msg.id })) : Exit.succeed(msg.ok))
         }
       }
       Queue.offerUnsafe(messages, msg)
@@ -133,11 +145,14 @@ export const spawnHelper = (opts: HelperSpawnOptions): Effect.Effect<Helper, Hel
 
     const send = (cmd: HelperCommand): Effect.Effect<void> => Effect.sync(() => writeLine(cmd))
 
-    const runSeq = (ops: ReadonlyArray<SeqOp>, timeoutMs: number): Effect.Effect<boolean, HelperGone | SeqTimeout> =>
+    const runSeq = (
+      ops: ReadonlyArray<SeqOp>,
+      timeoutMs: number,
+    ): Effect.Effect<boolean, HelperGone | SeqTimeout | SeqEscaped> =>
       Effect.suspend(() => {
         if (!alive) return Effect.fail(new HelperGone({ message: "helper not running" }))
         const id = nextId++
-        const d = Deferred.makeUnsafe<boolean, HelperGone>()
+        const d = Deferred.makeUnsafe<boolean, HelperGone | SeqEscaped>()
         pending.set(id, d)
         writeLine({ c: "seq", id, ops })
         return Deferred.await(d).pipe(
@@ -148,7 +163,12 @@ export const spawnHelper = (opts: HelperSpawnOptions): Effect.Effect<Helper, Hel
                 Effect.andThen(Effect.fail(new SeqTimeout({ id, ms: timeoutMs }))),
               ),
           }),
-          Effect.ensuring(Effect.sync(() => pending.delete(id))),
+          Effect.ensuring(
+            Effect.sync(() => {
+              pending.delete(id)
+              escaped.delete(id)
+            }),
+          ),
         )
       })
 

@@ -1,9 +1,10 @@
 /**
- * The native X11 helper as a scoped resource.
+ * The native helper (X11, macOS or Windows) as a scoped resource.
  *
  * `spawnHelper` starts the process; closing the scope closes its stdin (which makes the
- * helper release anything held and exit) and SIGKILLs it if it has not exited shortly
- * after. `superviseHelper` keeps one running, restarting it (bounded) when it dies.
+ * helper release anything held and exit 0) and kills it only if it has not exited shortly
+ * after. Never kill first: on Windows `kill()` is TerminateProcess, which gives the helper
+ * no chance to release mouse buttons a replay is holding. `superviseHelper` keeps one running, restarting it (bounded) when it dies.
  */
 import { spawn, type ChildProcess } from "node:child_process"
 import { accessSync, constants } from "node:fs"
@@ -43,7 +44,7 @@ export interface HelperSpawnOptions {
   readonly env?: NodeJS.ProcessEnv
   /** Free-form stderr lines (diagnostics). */
   readonly onStderr?: (line: string) => void
-  /** How long to wait for a clean exit after closing stdin before SIGKILL. */
+  /** How long to wait for a clean exit after closing stdin before killing it (default 1000). */
   readonly killAfterMs?: number
 }
 
@@ -53,7 +54,7 @@ process.once("exit", () => {
   for (const cp of live) cp.kill("SIGKILL")
 })
 
-const KNOWN = new Set(["ready", "windows", "btn", "motion", "key", "esc", "picked", "done", "error"])
+const KNOWN = new Set(["ready", "windows", "btn", "motion", "esc", "picked", "done", "error"])
 
 /** Parse one stdout line; null for anything that is not a recognisable message. */
 export const parseHelperLine = (line: string): HelperMessage | null => {
@@ -92,6 +93,8 @@ export const spawnHelper = (opts: HelperSpawnOptions): Effect.Effect<Helper, Hel
           spawn(opts.command, [...(opts.args ?? [])], {
             stdio: ["pipe", "pipe", "pipe"],
             env: opts.env ?? process.env,
+            // Windows: never flash a console (the real helper is a GUI-subsystem exe anyway).
+            windowsHide: true,
           }),
         catch: (e) => new HelperSpawnError({ message: `failed to start helper: ${String(e)}` }),
       }),

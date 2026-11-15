@@ -4,6 +4,12 @@
  */
 import type { WindowId } from "./protocol"
 
+/** Allowed click-offset radii in pixels, in UI order. 0 = off (the default), 20 = the maximum. */
+export const CLICK_OFFSETS = [0, 1, 5, 10, 15, 20] as const
+
+/** Allowed maximum click delays in milliseconds, in UI order. 0 = off (the default), 500 = the maximum. */
+export const CLICK_DELAYS = [0, 50, 100, 200, 300, 500] as const
+
 export interface GroupWindow {
   readonly id: WindowId
   /** 1-based label, ordered left-to-right then top-to-bottom on screen. */
@@ -19,6 +25,11 @@ export interface AppState {
   /** Master on/off switch for replication (the toggle). */
   readonly enabled: boolean
   readonly helper: "starting" | "ready" | "error"
+  /**
+   * With helper "error": why it stopped. With helper "starting": an `error` the helper sent
+   * before `ready`, which the user has to act on (e.g. a missing macOS permission); cleared
+   * by `ready`.
+   */
   readonly helperError: string | null
   /** True while the user is clicking windows to add to / remove from the group. */
   readonly picking: boolean
@@ -31,10 +42,12 @@ export interface AppState {
   /** "auto": whichever included window you click in is the source. "pinned": only `masterId`. */
   readonly masterMode: "auto" | "pinned"
   readonly masterId: WindowId | null
-  /** Optional keyboard replication. */
-  readonly replicateKeys: boolean
-  /** Drag replay speed multiplier (1 = original timing). */
-  readonly dragSpeed: number
+  /** Radius in pixels of the random offset each target window's replayed gesture is shifted
+   *  by (one of `CLICK_OFFSETS`; 0 = off, every target gets exactly the same spot). */
+  readonly clickOffset: number
+  /** Maximum random pause in ms before replaying into each target window (one of
+   *  `CLICK_DELAYS`; 0 = off, targets are replayed back to back). */
+  readonly clickDelay: number
   /** Global toggle hotkey as an Electron accelerator, e.g. "Control+`". */
   readonly hotkey: string
   /** True while a gesture is being replayed into the other windows. */
@@ -57,8 +70,10 @@ export interface ClickeredApi {
   setIncluded(id: WindowId, included: boolean): void
   /** Pin a master window, or null to return to auto mode. */
   setMaster(id: WindowId | null): void
-  setReplicateKeys(on: boolean): void
-  setDragSpeed(speed: number): void
+  /** Set the click offset radius in pixels (snapped to the nearest of `CLICK_OFFSETS`). */
+  setClickOffset(px: number): void
+  /** Set the maximum click delay in ms (snapped to the nearest of `CLICK_DELAYS`). */
+  setClickDelay(ms: number): void
   /** Renderer reports the pixel size its content needs; main resizes the frameless window. */
   setSize(width: number, height: number): void
   quit(): void
@@ -78,7 +93,7 @@ export type IpcCommand =
   | { readonly c: "clearGroup" }
   | { readonly c: "setIncluded"; readonly id: WindowId; readonly included: boolean }
   | { readonly c: "setMaster"; readonly id: WindowId | null }
-  | { readonly c: "setReplicateKeys"; readonly on: boolean }
-  | { readonly c: "setDragSpeed"; readonly speed: number }
+  | { readonly c: "setClickOffset"; readonly px: number }
+  | { readonly c: "setClickDelay"; readonly ms: number }
   | { readonly c: "setSize"; readonly width: number; readonly height: number }
   | { readonly c: "quit" }

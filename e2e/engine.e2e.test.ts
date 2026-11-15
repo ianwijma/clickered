@@ -7,7 +7,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest"
 import type { AppState } from "@shared/ipc"
-import { ConfigStore, DEFAULT_CONFIG } from "../src/main/config"
+import { ConfigStore, DEFAULT_CONFIG, type Config } from "../src/main/config"
 import { startEngine, type Engine } from "../src/main/engine"
 import { B_FREE, HELPER, assertSandbox, inA, phys, pointer, sleep, startFakeWm, waitFor, waitForPickGrab, type FakeWm } from "./support/x11"
 
@@ -27,10 +27,22 @@ afterEach(async () => {
   await sleep(100)
 })
 
-const start = async (members: number[]): Promise<{ engine: Engine; states: AppState[] }> => {
-  const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "clickered-e2e-")), "config.json"), DEFAULT_CONFIG)
+const start = async (
+  members: number[],
+  extra: { config?: Partial<Config>; rng?: () => number } = {},
+): Promise<{ engine: Engine; states: AppState[] }> => {
+  const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "clickered-e2e-")), "config.json"), {
+    ...DEFAULT_CONFIG,
+    ...extra.config,
+  })
   const states: AppState[] = []
-  engine = startEngine({ config: store, helper: { command: HELPER }, initialMembers: members, onState: (s) => states.push(s) })
+  engine = startEngine({
+    config: store,
+    helper: { command: HELPER },
+    initialMembers: members,
+    onState: (s) => states.push(s),
+    ...(extra.rng ? { rng: extra.rng } : {}),
+  })
   const e = engine
   await waitFor(() => e.getState().helper === "ready" && e.getState().windows.length === members.length, "helper ready")
   return { engine: e, states }
@@ -69,6 +81,47 @@ describe("engine e2e (real helper, Xvfb)", () => {
     await waitFor(() => !engine.getState().busy, "replay finished")
     const p = pointer()
     expect([p.x, p.y]).toEqual(at)
+  })
+
+  it("shifts the replayed click in the target by the click offset, not the source", async () => {
+    // rng 0.25 -> 20 px * sqrt(0.25) = 10 px at angle pi/2: straight down.
+    await start([wm.ids.A, wm.ids.B], { config: { clickOffset: 20 }, rng: () => 0.25 })
+    phys.click(...inA(0.5, 0.5))
+    await waitFor(() => wm.on("B", "release").length === 1, "replayed click on B")
+    const [press] = wm.on("B", "press")
+    near(press?.x, 200)
+    near(press?.y, 160)
+    expect(wm.on("A", "press")).toHaveLength(1)
+  })
+
+  it("waits the click delay before replaying into the target", async () => {
+    // rng ~1 -> the full 500 ms before B; the click itself still lands on the same spot.
+    const { engine } = await start([wm.ids.A, wm.ids.B], { config: { clickDelay: 500 }, rng: () => 0.9999 })
+    const t0 = Date.now()
+    phys.click(...inA(0.5, 0.5))
+    await waitFor(() => wm.on("B", "activate").length === 1, "B activated")
+    const tActivated = Date.now()
+    await waitFor(() => wm.on("B", "release").length === 1, "replayed click on B")
+    expect(Date.now() - tActivated).toBeGreaterThanOrEqual(400)
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(500)
+    const [press] = wm.on("B", "press")
+    near(press?.x, 200)
+    near(press?.y, 150)
+    await waitFor(() => !engine.getState().busy, "replay finished")
+    expect(engine.getState().enabled).toBe(true)
+  })
+
+  it("Escape during the click delay aborts before anything is pressed, and pauses", async () => {
+    const { engine } = await start([wm.ids.A, wm.ids.B], { config: { clickDelay: 500 }, rng: () => 0.9999 })
+    phys.click(...inA(0.5, 0.5))
+    // B is activated by the warp, then the helper sleeps 500 ms before pressing.
+    await waitFor(() => wm.on("B", "activate").length === 1, "B activated")
+    await sleep(100)
+    phys.key(ESCAPE, true)
+    phys.key(ESCAPE, false)
+    await waitFor(() => !engine.getState().enabled && !engine.getState().busy, "paused after Escape")
+    await sleep(600)
+    expect(wm.on("B", "press")).toHaveLength(0)
   })
 
   it("replays a drag as press, motion path, release", async () => {

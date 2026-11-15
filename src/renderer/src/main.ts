@@ -1,7 +1,7 @@
 import "./styles.css"
-import type { AppState, ClickeredApi, GroupWindow } from "@shared/ipc"
+import { CLICK_DELAYS, CLICK_OFFSETS, type AppState, type ClickeredApi, type GroupWindow } from "@shared/ipc"
 import type { WindowId } from "@shared/protocol"
-import { countText, DRAG_SPEEDS, formatHotkey, groupName, nearestSpeed } from "./format"
+import { clickDelayLabel, clickOffsetLabel, countText, formatHotkey, groupName } from "./format"
 import { icon } from "./icons"
 
 // ---------------------------------------------------------------------------
@@ -196,33 +196,49 @@ function start(api: ClickeredApi): void {
   const list = el("ul", "flex flex-col")
   const listEmpty = el("div", `px-2 py-2 text-xs whitespace-normal ${MUTED}`)
 
-  const keysSwitch = smallSwitch("Replicate typing")
-  const keysRow = el(
-    "label",
-    "flex h-8 items-center gap-2 rounded-lg px-2",
-    el("span", "flex-1", "Replicate typing"),
-    el(
-      "span",
-      "rounded bg-amber-100 px-1.5 py-px text-[10px] font-semibold tracking-wide text-amber-800 uppercase dark:bg-amber-400/15 dark:text-amber-300",
-      "Experimental",
-    ),
-    keysSwitch,
-  )
+  /** One "label + segmented radio group" settings row (click offset, click delay). */
+  const SEG_BTN =
+    "h-6 min-w-9 rounded-md px-1.5 text-xs font-medium tabular-nums text-zinc-600 hover:text-zinc-900 aria-checked:bg-white aria-checked:text-zinc-900 aria-checked:shadow-sm dark:text-zinc-400 dark:hover:text-zinc-100 dark:aria-checked:bg-zinc-600 dark:aria-checked:text-white"
+  function segmentedRow(
+    name: string,
+    hint: string,
+    values: ReadonlyArray<number>,
+    label: (v: number) => string,
+    aria: (v: number) => string,
+    pick: (v: number) => void,
+  ): { readonly row: HTMLElement; readonly btns: ReadonlyArray<{ readonly v: number; readonly b: HTMLButtonElement }> } {
+    const btns = values.map((v) => {
+      const b = button(SEG_BTN, aria(v), label(v))
+      b.setAttribute("role", "radio")
+      b.addEventListener("click", () => pick(v))
+      return { v, b }
+    })
+    const group = el("div", "inline-flex rounded-lg bg-zinc-900/[.06] p-0.5 dark:bg-white/[.08]", ...btns.map((x) => x.b))
+    group.setAttribute("role", "radiogroup")
+    group.setAttribute("aria-label", name)
+    // The unit is in each option's label/tooltip: "Click offset (px)" plus six segments
+    // would not fit the panel at the bar's minimum width.
+    const nameEl = el("span", "flex-1", name)
+    nameEl.title = hint
+    return { row: el("div", "flex h-9 items-center gap-2 px-2", nameEl, group), btns }
+  }
 
-  const speedBtns = DRAG_SPEEDS.map((s) => {
-    const b = button(
-      "h-6 min-w-9 rounded-md px-1.5 text-xs font-medium tabular-nums text-zinc-600 hover:text-zinc-900 aria-checked:bg-white aria-checked:text-zinc-900 aria-checked:shadow-sm dark:text-zinc-400 dark:hover:text-zinc-100 dark:aria-checked:bg-zinc-600 dark:aria-checked:text-white",
-      `Drag replay speed ${s}×`,
-      `${s}×`,
-    )
-    b.setAttribute("role", "radio")
-    b.addEventListener("click", () => api.setDragSpeed(s))
-    return { speed: s, b }
-  })
-  const speedGroup = el("div", "inline-flex rounded-lg bg-zinc-900/[.06] p-0.5 dark:bg-white/[.08]", ...speedBtns.map((x) => x.b))
-  speedGroup.setAttribute("role", "radiogroup")
-  speedGroup.setAttribute("aria-label", "Drag speed")
-  const speedRow = el("div", "flex h-9 items-center gap-2 px-2", el("span", "flex-1", "Drag speed"), speedGroup)
+  const offset = segmentedRow(
+    "Click offset",
+    "Shift each other window's click by a random amount of up to this many pixels",
+    CLICK_OFFSETS,
+    clickOffsetLabel,
+    (px) => (px === 0 ? "Click offset off (same spot in every window)" : `Click offset ${px} pixels`),
+    (px) => api.setClickOffset(px),
+  )
+  const delay = segmentedRow(
+    "Click delay",
+    "Wait a random time of up to this many milliseconds before replaying into each other window",
+    CLICK_DELAYS,
+    clickDelayLabel,
+    (ms) => (ms === 0 ? "Click delay off (no pause between windows)" : `Click delay ${ms} milliseconds`),
+    (ms) => api.setClickDelay(ms),
+  )
 
   const TEXT_BTN =
     "h-7 rounded-md px-2 text-xs font-medium text-zinc-600 hover:bg-zinc-900/[.07] hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/10 dark:hover:text-zinc-100"
@@ -230,7 +246,7 @@ function start(api: ClickeredApi): void {
   const forgetBtn = button(TEXT_BTN, "Remove all windows from the group", "Forget group")
   const quitBtn = button(
     TEXT_BTN + " hover:!text-red-700 dark:hover:!text-red-300",
-    "Quit clickered",
+    "Quit Clickered",
     "Quit",
   )
 
@@ -245,8 +261,8 @@ function start(api: ClickeredApi): void {
     errorBox,
     listSection,
     listDivider,
-    keysRow,
-    speedRow,
+    offset.row,
+    delay.row,
     divider(),
     el("div", "flex items-center gap-0.5", hotkeyHint, forgetBtn, quitBtn),
   )
@@ -341,9 +357,22 @@ function start(api: ClickeredApi): void {
     return "group"
   }
 
+  /** The startup error the panel was last opened for (see render). */
+  let shownStartupError: string | null = null
+
   function render(): void {
     const s = state
     const mode = modeOf(s)
+    // An error before `ready` is something the user must act on while the helper keeps
+    // waiting (macOS: grant Accessibility). Open the panel to show the full text, and
+    // close it again once the helper is ready.
+    const startupError = mode === "starting" ? (s?.helperError ?? null) : null
+    if (startupError !== shownStartupError) {
+      if (startupError !== null) expanded = true
+      else if (shownStartupError !== null) expanded = false
+      shownStartupError = startupError
+    }
+    const alert = mode === "error" || startupError !== null
 
     show(segStatus, mode === "starting" || mode === "error")
     show(segEmpty, mode === "empty")
@@ -358,13 +387,17 @@ function start(api: ClickeredApi): void {
 
     // status
     statusIcon.className =
-      mode === "error"
+      alert
         ? "grid size-6 shrink-0 place-items-center rounded-full bg-red-600 text-white dark:bg-red-500"
         : "hidden"
     if (mode === "error") {
       setText(statusText, "Helper failed")
       statusText.className = "truncate font-semibold text-red-700 dark:text-red-400"
       setAttr(segStatus, "title", s?.helperError ?? "The input helper stopped")
+    } else if (startupError !== null) {
+      setText(statusText, "Action needed")
+      statusText.className = "truncate font-semibold text-red-700 dark:text-red-400"
+      setAttr(segStatus, "title", startupError)
     } else {
       setText(statusText, "Starting…")
       statusText.className = `truncate ${MUTED}`
@@ -407,8 +440,11 @@ function start(api: ClickeredApi): void {
     setFlag(root, "data-replaying", s.busy)
 
     // panel content
-    show(errorBox, s.helper === "error")
-    setText(errorBox, s.helperError ? `Helper error: ${s.helperError}` : "The input helper stopped.")
+    show(errorBox, s.helper === "error" || startupError !== null)
+    setText(
+      errorBox,
+      startupError ?? (s.helperError ? `Helper error: ${s.helperError}` : "The input helper stopped."),
+    )
 
     const hasGroup = s.groupClass !== null
     show(listSection, hasGroup || s.windows.length > 0)
@@ -428,9 +464,8 @@ function start(api: ClickeredApi): void {
     setText(masterLine, master)
     show(masterLine, s.windows.length > 0)
 
-    setAttr(keysSwitch, "aria-checked", s.replicateKeys ? "true" : "false")
-    const sp = nearestSpeed(s.dragSpeed)
-    for (const { speed, b } of speedBtns) setAttr(b, "aria-checked", speed === sp ? "true" : "false")
+    for (const { v, b } of offset.btns) setAttr(b, "aria-checked", v === s.clickOffset ? "true" : "false")
+    for (const { v, b } of delay.btns) setAttr(b, "aria-checked", v === s.clickDelay ? "true" : "false")
 
     setText(hotkeyHint, hk ? `${hk} toggles` : "")
     show(forgetBtn, hasGroup)
@@ -452,9 +487,6 @@ function start(api: ClickeredApi): void {
       panel.classList.add("panel-in")
     }
     render()
-  })
-  keysSwitch.addEventListener("click", () => {
-    if (state) api.setReplicateKeys(!state.replicateKeys)
   })
   forgetBtn.addEventListener("click", () => api.clearGroup())
   quitBtn.addEventListener("click", () => api.quit())
@@ -513,7 +545,7 @@ void resolveApi().then((api) => {
     el(
       "div",
       "inline-flex p-2.5",
-      el("div", "surface rounded-full px-4 py-2 text-[13px] text-red-700 dark:text-red-400", "clickered: preload API missing"),
+      el("div", "surface rounded-full px-4 py-2 text-[13px] text-red-700 dark:text-red-400", "Clickered: preload API missing"),
     ),
   )
 })

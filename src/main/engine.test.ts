@@ -53,6 +53,7 @@ const setup = (opts: {
   events?: HelperMessage[]
   env?: Record<string, string>
   members?: number[]
+  rng?: () => number
   onReplay?: (active: boolean) => void
 }) => {
   const fake = fakeHelper({
@@ -68,6 +69,7 @@ const setup = (opts: {
     helper: fake.opts,
     initialMembers: opts.members ?? [10, 20, 30],
     onState: (s) => states.push(s),
+    ...(opts.rng ? { rng: opts.rng } : {}),
     ...(opts.onReplay ? { onReplay: opts.onReplay } : {}),
   })
   engines.push(engine)
@@ -194,10 +196,14 @@ describe("engine (fake helper)", () => {
   })
 
   it("Done stops picking and keeps what was picked", async () => {
-    const { engine, fake } = setup({ members: [], env: { FAKE_PICK: "10" } })
+    // FAKE_PICK_WAIT: after the first pick the fake waits for the next click instead of
+    // answering "cancelled", so picking is still on when Done is pressed (otherwise it is a
+    // race between the test and the fake, lost on slow runners).
+    const { engine, fake } = setup({ members: [], env: { FAKE_PICK: "10", FAKE_PICK_WAIT: "1" } })
     await waitFor(() => engine.getState().helper === "ready")
     engine.command({ c: "startPick" })
     await waitFor(() => engine.getState().windows.length === 1)
+    expect(engine.getState().picking).toBe(true)
     engine.command({ c: "cancelPick" })
     await waitFor(() => !engine.getState().picking)
     // The fake helper is a separate process: wait for it to log the command rather than
@@ -207,33 +213,73 @@ describe("engine (fake helper)", () => {
     expect(engine.getState().windows.map((w) => w.id)).toEqual([10])
   })
 
-  it("buffers keys and replays them after a pause", async () => {
-    const key = (down: boolean, keycode: number, w = 20, time = 0): HelperMessage => ({ t: "key", down, keycode, win: w, time })
-    const { engine, fake, seqs } = setup({
-      config: { replicateKeys: true },
-      events: [key(true, 38), key(false, 38), key(true, 56, 40) /* other window: ignored */, key(true, 39), key(false, 39)],
+  it("shifts each target by its own random click offset, converted with that window's size", async () => {
+    // rng 0.25 -> radius 20 * sqrt(0.25) = 10 px at angle pi/2: straight down. Windows are 640x1374.
+    const { seqs } = setup({
+      config: { clickOffset: 20 },
+      rng: () => 0.25,
+      events: [btn(true, 1, 20, 0.5, 0.25, 1020, 383, 1000), btn(false, 1, 20, 0.5, 0.25, 1021, 383, 1060)],
     })
     await waitFor(() => seqs().length === 1)
-    expect(fake.log()[0]).toBe("keys 1")
+    const fy = (0.25 + 10 / 1374).toFixed(5)
     expect(seqs()[0]).toBe(
-      "seq 1 f 10;s 40;kd 38;s 8;ku 38;s 8;kd 39;s 8;ku 39;s 8;f 30;s 40;kd 38;s 8;ku 38;s 8;kd 39;s 8;ku 39;s 8;f 20",
+      `seq 1 m 10 0.50000 ${fy};s 25;d 1;s 35;u 1;s 20;m 30 0.50000 ${fy};s 25;d 1;s 35;u 1;s 20;w 1021 383;f 20`,
     )
-    engine.command({ c: "setReplicateKeys", on: false })
-    await waitFor(() => fake.log().includes("keys 0"))
   })
 
-  it("drops buffered keys when their source window is excluded before the flush", async () => {
-    const key = (down: boolean, keycode: number, w = 20, time = 0): HelperMessage => ({ t: "key", down, keycode, win: w, time })
-    const { engine, seqs } = setup({
-      config: { replicateKeys: true },
-      events: [key(true, 38), key(false, 38)],
+  it("persists the click offset, snapped to an allowed value", async () => {
+    const { engine, store } = setup({})
+    await waitFor(() => engine.getState().helper === "ready")
+    expect(engine.getState().clickOffset).toBe(0)
+    engine.command({ c: "setClickOffset", px: 12 })
+    await waitFor(() => engine.getState().clickOffset === 10)
+    expect(store.get().clickOffset).toBe(10)
+    engine.command({ c: "setClickOffset", px: 500 })
+    await waitFor(() => engine.getState().clickOffset === 20)
+  })
+
+  it("pauses a random time before each target, drawn after that target's offset", async () => {
+    // rng 0.25: offset 10 px down (as above), delay floor(0.25 * 501) = 125 ms per target.
+    const { seqs } = setup({
+      config: { clickOffset: 20, clickDelay: 500 },
+      rng: () => 0.25,
+      events: [btn(true, 1, 20, 0.5, 0.25, 1020, 383, 1000), btn(false, 1, 20, 0.5, 0.25, 1021, 383, 1060)],
     })
-    await waitFor(() => engine.getState().helper === "ready" && engine.getState().windows.length === 3)
-    // Keys arrive ~80 ms after startup; the buffer flushes 350 ms after the last one.
-    await sleep(150)
-    engine.command({ c: "setIncluded", id: 20, included: false })
-    await sleep(600)
-    expect(seqs()).toEqual([])
+    await waitFor(() => seqs().length === 1)
+    const fy = (0.25 + 10 / 1374).toFixed(5)
+    expect(seqs()[0]).toBe(
+      `seq 1 m 10 0.50000 ${fy};s 125;s 25;d 1;s 35;u 1;s 20;m 30 0.50000 ${fy};s 125;s 25;d 1;s 35;u 1;s 20;w 1021 383;f 20`,
+    )
+  })
+
+  it("persists the click delay, snapped to an allowed value", async () => {
+    const { engine, store } = setup({})
+    await waitFor(() => engine.getState().helper === "ready")
+    expect(engine.getState().clickDelay).toBe(0)
+    engine.command({ c: "setClickDelay", ms: 120 })
+    await waitFor(() => engine.getState().clickDelay === 100)
+    expect(store.get().clickDelay).toBe(100)
+    engine.command({ c: "setClickDelay", ms: 5000 })
+    await waitFor(() => engine.getState().clickDelay === 500)
+    expect(store.get().clickDelay).toBe(500)
+  })
+
+  it("stays busy through a slow (delayed) replay and does not time it out", async () => {
+    // The fake answers after 1.2 s; with a 500 ms max delay per target that is a plausible replay.
+    const { engine, seqs, fake } = setup({
+      config: { clickDelay: 500 },
+      rng: () => 0.9999,
+      env: { FAKE_SEQ_DELAY: "1200" },
+      events: [btn(true, 1, 20, 0.5, 0.5, 1020, 700, 1000), btn(false, 1, 20, 0.5, 0.5, 1020, 700, 1010)],
+    })
+    // Busy is set before the fake has logged the seq line, so wait for both.
+    await waitFor(() => engine.getState().busy && seqs().length === 1)
+    expect(seqs()[0]).toContain("s 500;")
+    await sleep(900)
+    expect(engine.getState().busy).toBe(true)
+    await waitFor(() => !engine.getState().busy, 3000)
+    expect(fake.log()).not.toContain("abort")
+    expect(engine.getState().enabled).toBe(true)
   })
 
   it("sends abort when disabled mid-replay", async () => {
@@ -257,12 +303,42 @@ describe("engine (fake helper)", () => {
     expect(engine.getState().enabled).toBe(false)
   })
 
+  it("Escape during a long click delay still stops and pauses", async () => {
+    const { engine } = setup({
+      config: { clickDelay: 500 },
+      rng: () => 0.9999,
+      env: { FAKE_ESC_ON_SEQ: "200" },
+      events: [btn(true, 1, 20, 0.5, 0.5, 1020, 700, 1000), btn(false, 1, 20, 0.5, 0.5, 1020, 700, 1010)],
+    })
+    await waitFor(() => engine.getState().busy)
+    await waitFor(() => !engine.getState().busy)
+    await sleep(50)
+    expect(engine.getState().enabled).toBe(false)
+  })
+
   it("surfaces a missing helper as an error", async () => {
     const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "clickered-cfg-")), "c.json"), DEFAULT_CONFIG)
     const engine = startEngine({ config: store, helper: { command: "/nonexistent/helper" }, onState: () => {} })
     engines.push(engine)
     await waitFor(() => engine.getState().helper === "error")
     expect(engine.getState().helperError).toContain("not found")
+  })
+
+  it("shows an error sent before ready while the helper waits, and clears it on ready", async () => {
+    const msg = "Clickered needs the Accessibility permission (System Settings > Privacy & Security > Accessibility)"
+    const { engine, states } = setup({ env: { FAKE_STARTUP_ERROR: msg, FAKE_READY_DELAY: "300" } })
+    await waitFor(() => states.some((s) => s.helper === "starting" && s.helperError === msg))
+    expect(engine.getState().helper).toBe("starting")
+    await waitFor(() => engine.getState().helper === "ready")
+    expect(engine.getState().helperError).toBeNull()
+    await waitFor(() => states.at(-1)?.helper === "ready" && states.at(-1)?.helperError === null)
+  })
+
+  it("only logs an error that arrives after ready", async () => {
+    const { engine } = setup({ events: [{ t: "error", msg: "unknown command: bogus" }] })
+    await waitFor(() => engine.getState().helper === "ready")
+    await sleep(150)
+    expect(engine.getState().helperError).toBeNull()
   })
 
   it("closes the helper's stdin on shutdown", async () => {

@@ -2,6 +2,7 @@
  * Pure replay-script construction: recorded gestures -> helper `SeqOp[]`.
  * No Electron, no Effect, no I/O — everything here is unit-tested.
  */
+import { CLICK_DELAYS, CLICK_OFFSETS } from "@shared/ipc"
 import type { SeqOp, WindowId } from "@shared/protocol"
 
 /** Every timing / threshold constant of the engine, in one place (ms / px). Overridable from config. */
@@ -26,16 +27,6 @@ export interface Timing {
   readonly wheelTickGap: number
   /** wheel: maximum ticks replayed for one coalesced wheel gesture. */
   readonly wheelMaxTicks: number
-  /** keys: pause after focusing a target. */
-  readonly keyFocusSettle: number
-  /** keys: pause after each key event. */
-  readonly keyGap: number
-  /** keys: flush the key buffer after this long without key events (and no keys held). */
-  readonly keyIdleFlush: number
-  /** keys: drop the buffer when it would grow beyond this many events. */
-  readonly keyMaxBuffer: number
-  /** keys: drop the buffer if keys stay "held" without any event for this long. */
-  readonly keyStuckTimeout: number
   /** Root-pixel radius within which a press/release counts as a click. Also used for wheel coalescing. */
   readonly clickSlop: number
   /** Gestures longer than this are discarded. */
@@ -57,22 +48,25 @@ export const DEFAULT_TIMING: Timing = {
   wheelMoveSettle: 20,
   wheelTickGap: 12,
   wheelMaxTicks: 60,
-  keyFocusSettle: 40,
-  keyGap: 8,
-  keyIdleFlush: 350,
-  keyMaxBuffer: 200,
-  keyStuckTimeout: 5000,
   clickSlop: 6,
   maxGestureMs: 20000,
   seqTimeoutSlack: 3000,
   activateCost: 200,
 }
 
-export const MIN_DRAG_SPEED = 0.25
-export const MAX_DRAG_SPEED = 4
+/** Snap any number to the nearest of `allowed` (ascending; non-numbers -> 0, ties -> the smaller). */
+const snapTo = (allowed: ReadonlyArray<number>, v: unknown): number => {
+  if (typeof v !== "number" || !Number.isFinite(v)) return 0
+  let best = allowed[0]!
+  for (const o of allowed) if (Math.abs(o - v) < Math.abs(best - v)) best = o
+  return best
+}
 
-export const clampDragSpeed = (speed: number): number =>
-  Number.isFinite(speed) ? Math.min(MAX_DRAG_SPEED, Math.max(MIN_DRAG_SPEED, speed)) : 1
+/** Snap any number to the nearest allowed click offset (non-numbers -> 0, ties -> the smaller). */
+export const snapClickOffset = (px: unknown): number => snapTo(CLICK_OFFSETS, px)
+
+/** Snap any number to the nearest allowed click delay (non-numbers -> 0, ties -> the smaller). */
+export const snapClickDelay = (ms: unknown): number => snapTo(CLICK_DELAYS, ms)
 
 /** One recorded pointer sample (from a `btn` or `motion` helper message). */
 export interface Point {
@@ -83,11 +77,6 @@ export interface Point {
   readonly y: number
   /** Monotonic ms. */
   readonly time: number
-}
-
-export interface KeyEvent {
-  readonly down: boolean
-  readonly keycode: number
 }
 
 export type Gesture =
@@ -101,8 +90,6 @@ export type Gesture =
       readonly at: Point
       readonly count: number
     }
-  /** A burst of typing in `source`. */
-  | { readonly kind: "keys"; readonly source: WindowId; readonly events: ReadonlyArray<KeyEvent> }
 
 export type PressKind = "click" | "drag"
 
@@ -139,11 +126,62 @@ export const resample = (points: ReadonlyArray<Point>, minStep: number): Readonl
   return out
 }
 
-const s = (ms: number): SeqOp => ({ op: "s", ms })
-const m = (win: WindowId, p: { readonly fx: number; readonly fy: number }): SeqOp => ({ op: "m", win, fx: p.fx, fy: p.fy })
+/** A shift of a whole gesture, as fractions of the target's content rect. */
+export interface Shift {
+  readonly dfx: number
+  readonly dfy: number
+}
 
-export const clickOps = (target: WindowId, button: number, at: Point, t: Timing): SeqOp[] => [
-  m(target, at),
+export const NO_SHIFT: Shift = { dfx: 0, dfy: 0 }
+
+/** A uniformly random point inside a disc of `radius` (pixels). */
+export const randomInDisc = (radius: number, rng: () => number): { readonly dx: number; readonly dy: number } => {
+  if (!(radius > 0)) return { dx: 0, dy: 0 }
+  const r = radius * Math.sqrt(rng())
+  const a = 2 * Math.PI * rng()
+  return { dx: r * Math.cos(a), dy: r * Math.sin(a) }
+}
+
+/**
+ * Draw one random click offset for a target window of content size `w`x`h` pixels,
+ * converted to fractions. No offset when the radius is 0 or the size is unknown / empty.
+ */
+export const drawShift = (
+  radius: number,
+  size: { readonly w: number; readonly h: number } | undefined,
+  rng: () => number,
+): Shift => {
+  if (!(radius > 0) || !size || !(size.w > 0) || !(size.h > 0)) return NO_SHIFT
+  const { dx, dy } = randomInDisc(radius, rng)
+  return { dfx: dx / size.w, dfy: dy / size.h }
+}
+
+/**
+ * Draw one random pause for a target window: uniform over the whole milliseconds
+ * `0..max` (both ends included). One rng draw when `max > 0`, none otherwise.
+ */
+export const drawDelay = (max: number, rng: () => number): number => {
+  if (!(max > 0)) return 0
+  return Math.min(max, Math.floor(rng() * (Math.floor(max) + 1)))
+}
+
+/** Shift one coordinate; a point that was inside the window (0..1) stays inside it. */
+const shiftAxis = (f: number, d: number): number => {
+  if (d === 0) return f
+  const v = f + d
+  return f >= 0 && f <= 1 ? Math.min(1, Math.max(0, v)) : v
+}
+
+const s = (ms: number): SeqOp => ({ op: "s", ms })
+const m = (win: WindowId, p: { readonly fx: number; readonly fy: number }, sh: Shift): SeqOp => ({
+  op: "m",
+  win,
+  fx: shiftAxis(p.fx, sh.dfx),
+  fy: shiftAxis(p.fy, sh.dfy),
+})
+
+export const clickOps = (target: WindowId, button: number, at: Point, t: Timing, sh: Shift = NO_SHIFT): SeqOp[] => [
+  m(target, at, sh),
   s(t.clickMoveSettle),
   { op: "d", button },
   s(t.clickHold),
@@ -153,95 +191,114 @@ export const clickOps = (target: WindowId, button: number, at: Point, t: Timing)
 
 /**
  * Drag replay for one target. `path` must already be resampled. Between consecutive
- * points the original delta divided by `speed` is slept — including the hold between the
- * press and the first motion, and the pause between the last motion and the release, which
- * governs fling inertia.
+ * points the original delta is slept — including the hold between the press and the first
+ * motion, and the pause between the last motion and the release, which governs fling
+ * inertia. The whole path is moved by `sh`, so the drag keeps its shape.
  */
 export const dragOps = (
   target: WindowId,
   button: number,
   path: ReadonlyArray<Point>,
-  speed: number,
   t: Timing,
+  sh: Shift = NO_SHIFT,
 ): SeqOp[] => {
   const p0 = path[0]
   if (!p0) return []
   // Hold after the press for the recorded press-to-first-motion delay (at least the settle),
   // so a long press before moving is preserved.
   const p1 = path[1]
-  const hold = p1 ? Math.max(t.dragPressSettle, (p1.time - p0.time) / speed) : t.dragPressSettle
-  const ops: SeqOp[] = [m(target, p0), s(t.dragMoveSettle), { op: "d", button }, s(hold)]
+  const hold = p1 ? Math.max(t.dragPressSettle, p1.time - p0.time) : t.dragPressSettle
+  const ops: SeqOp[] = [m(target, p0, sh), s(t.dragMoveSettle), { op: "d", button }, s(hold)]
   for (let i = 1; i < path.length; i++) {
     const p = path[i]!
-    ops.push(m(target, p))
+    ops.push(m(target, p, sh))
     const next = path[i + 1]
-    if (next) ops.push(s((next.time - p.time) / speed))
+    if (next) ops.push(s(next.time - p.time))
   }
   ops.push({ op: "u", button }, s(t.dragAfter))
   return ops
 }
 
-export const wheelOps = (target: WindowId, button: number, at: Point, count: number, t: Timing): SeqOp[] => {
-  const ops: SeqOp[] = [m(target, at), s(t.wheelMoveSettle)]
+export const wheelOps = (
+  target: WindowId,
+  button: number,
+  at: Point,
+  count: number,
+  t: Timing,
+  sh: Shift = NO_SHIFT,
+): SeqOp[] => {
+  const ops: SeqOp[] = [m(target, at, sh), s(t.wheelMoveSettle)]
   for (let i = 0; i < count; i++) ops.push({ op: "d", button }, { op: "u", button }, s(t.wheelTickGap))
-  return ops
-}
-
-export const keyOps = (target: WindowId, events: ReadonlyArray<KeyEvent>, t: Timing): SeqOp[] => {
-  const ops: SeqOp[] = [{ op: "f", win: target }, s(t.keyFocusSettle)]
-  for (const e of events) ops.push({ op: e.down ? "kd" : "ku", keycode: e.keycode }, s(t.keyGap))
   return ops
 }
 
 export interface ScriptOptions {
   readonly timing: Timing
-  readonly dragSpeed: number
-}
-
-/** Where the user's pointer was when the gesture ended (root pixels), if it is a pointer gesture. */
-const restorePoint = (g: Gesture): Point | undefined => {
-  switch (g.kind) {
-    case "press":
-      return g.points[g.points.length - 1]
-    case "wheel":
-      return g.at
-    case "keys":
-      return undefined
-  }
+  /** Click offset radius in pixels (0 / omitted = every target gets the exact same spot). */
+  readonly clickOffset?: number
+  /** Current content-rect size of each target, needed to turn the pixel offset into fractions. */
+  readonly sizeOf?: (win: WindowId) => { readonly w: number; readonly h: number } | undefined
+  /** Maximum random pause in ms before replaying into each target (0 / omitted = no pause). */
+  readonly clickDelay?: number
+  /** Uniform [0, 1) random source (default `Math.random`). */
+  readonly rng?: () => number
 }
 
 /**
+ * Insert a target's random pause into its ops, directly after the target's first op (the
+ * `m` that warps onto it), before anything is pressed. Not before the `m`: in the helper's
+ * skip mode (previous target vanished / could not be activated) every `s` is ignored until
+ * the next `f`/`m`/`w`, so a pause placed in front of the `m` would be swallowed. After the
+ * `m` it can only be skipped together with its own target, which is then not replayed at all.
+ */
+const withDelay = (ops: SeqOp[], ms: number): SeqOp[] => (ms > 0 && ops.length > 0 ? [ops[0]!, s(ms), ...ops.slice(1)] : ops)
+
+/** Where the user's pointer was when the gesture ended (root pixels). */
+const restorePoint = (g: Gesture): Point | undefined =>
+  g.kind === "press" ? g.points[g.points.length - 1] : g.at
+
+/**
  * Full replay script for `targets` (already filtered: included, not the source, in index
- * order). Ends with a warp back to the user's pointer position (pointer gestures) and
- * re-focusing the source. Empty when there is nothing to do.
+ * order). Each target gets its own random click offset (see `ScriptOptions.clickOffset`)
+ * and its own random pause (see `ScriptOptions.clickDelay`, placement: `withDelay`).
+ *
+ * Random draws, per target in target order: first the offset (2 draws, only when the offset
+ * is on and the target's size is known: radius, then angle), then the delay (1 draw, only
+ * when the delay is on). With both off the rng is never called.
+ *
+ * Ends with a warp back to the user's pointer position and re-focusing the source. Empty
+ * when there is nothing to do.
  */
 export const buildScript = (g: Gesture, targets: ReadonlyArray<WindowId>, opts: ScriptOptions): SeqOp[] => {
   const t = opts.timing
   const ts = targets.filter((w) => w !== 0 && w !== g.source)
   if (ts.length === 0) return []
+  const radius = opts.clickOffset ?? 0
+  const rng = opts.rng ?? Math.random
+  const maxDelay = opts.clickDelay ?? 0
+  const shiftFor = (w: WindowId): Shift => (radius > 0 ? drawShift(radius, opts.sizeOf?.(w), rng) : NO_SHIFT)
+  /** Ops for one target: draws its offset, then its delay (that order, see above). */
+  const forTarget = (w: WindowId, build: (sh: Shift) => SeqOp[]): SeqOp[] => {
+    const sh = shiftFor(w)
+    return withDelay(build(sh), drawDelay(maxDelay, rng))
+  }
   const ops: SeqOp[] = []
   switch (g.kind) {
     case "press": {
       if (g.points.length === 0) return []
       if (classify(g.points, t.clickSlop) === "click") {
         const at = g.points[0]!
-        for (const w of ts) ops.push(...clickOps(w, g.button, at, t))
+        for (const w of ts) ops.push(...forTarget(w, (sh) => clickOps(w, g.button, at, t, sh)))
       } else {
-        const speed = clampDragSpeed(opts.dragSpeed)
-        const path = resample(g.points, t.dragMinStep * speed)
-        for (const w of ts) ops.push(...dragOps(w, g.button, path, speed, t))
+        const path = resample(g.points, t.dragMinStep)
+        for (const w of ts) ops.push(...forTarget(w, (sh) => dragOps(w, g.button, path, t, sh)))
       }
       break
     }
     case "wheel": {
       const n = Math.min(Math.max(0, Math.floor(g.count)), t.wheelMaxTicks)
       if (n === 0) return []
-      for (const w of ts) ops.push(...wheelOps(w, g.button, g.at, n, t))
-      break
-    }
-    case "keys": {
-      if (g.events.length === 0) return []
-      for (const w of ts) ops.push(...keyOps(w, g.events, t))
+      for (const w of ts) ops.push(...forTarget(w, (sh) => wheelOps(w, g.button, g.at, n, t, sh)))
       break
     }
   }

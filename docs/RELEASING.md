@@ -8,10 +8,16 @@ Each release has these files:
 
 | File | What it is |
 |---|---|
-| `clickered-X.Y.Z-amd64.deb` | Debian/Ubuntu package: `sudo apt install ./clickered-X.Y.Z-amd64.deb`. |
-| `SHA256SUMS.txt` | Checksum of the file above. |
+| `clickered-X.Y.Z-amd64.deb` | Linux x64 (X11), Debian/Ubuntu package: `sudo apt install ./clickered-X.Y.Z-amd64.deb`. Installs to `/opt/Clickered`, runs as `clickered`. |
+| `clickered-X.Y.Z-arm64.dmg` | macOS 11+ on Apple silicon. |
+| `clickered-X.Y.Z-x64.dmg` | macOS 11+ on Intel. |
+| `clickered-X.Y.Z-x64.exe` | Windows 10/11 x64, NSIS one-click installer (per user, no admin rights). |
+| `SHA256SUMS.txt` | Checksums of the files above. |
 
-It is a Linux x64 build with the native X11 helper included.
+Each one includes the native helper for its OS. Both dmgs contain the same universal
+macOS helper. Until signing certificates are set up (see "Code signing" below) the
+macOS app is only ad-hoc signed and the Windows installer is unsigned; README.md says
+what users have to click through.
 
 ## Run a release
 
@@ -56,22 +62,30 @@ Release candidates, step by step (keep the same **Version bump** each time):
 - **Version:** waits for your approval on the `release` environment, then commits
   the new version to `main` and pushes a `vX.Y.Z` tag. If `main` moved since the
   plan, it stops instead.
-- **Build and release:** checks out the tag, builds the native helper and the app,
-  packages it with electron-builder (`electron-builder.yml`), uploads the files as a
-  workflow artifact, and creates the GitHub Release with generated notes and the
-  files attached.
+- **Build (Linux / macOS / Windows):** three jobs in parallel, one per OS. Each checks
+  out the tag, builds the native helper and the app, and packages it with
+  electron-builder (`npm run dist`: `scripts/dist.mjs` + `electron-builder.yml`). The
+  icons are rendered once in the plan job (`scripts/release/render-icons.sh`) and
+  shared. The macOS job also verifies the code signatures. One OS failing does not
+  cancel the others.
+- **Release:** collects the files of all three, checks that every expected file is
+  there, writes `SHA256SUMS.txt`, uploads everything as one workflow artifact, and
+  creates the GitHub Release with generated notes and the files attached.
 
-The longer steps live in `scripts/release/` (`plan.sh`, `collect-files.sh`,
-`publish.sh`); each documents the environment variables it reads at the top.
+The longer steps live in `scripts/release/` (`plan.sh`, `render-icons.sh`,
+`collect-files.sh`, `publish.sh`); each documents the environment variables it reads at
+the top.
 
 A dry run still builds the packages: download them from the run's **Artifacts**
 to try a build before releasing it.
 
 ### If it fails
 
-- **Build and release failed:** click **Re-run failed jobs**. It builds the tag
-  that was already pushed, without bumping again. If the release was already
-  created, its files are replaced, and a release left as a draft is published.
+- **A Build job or Release failed:** click **Re-run failed jobs**. It builds the tag
+  that was already pushed, without bumping again (the packages of the OSes that
+  succeeded are kept for 7 days and reused). If the release was already created, its files are replaced,
+  and a release left as a draft is published. Nothing is released unless all three
+  OSes built.
 - **Plan failed with "Could not look up" or "Could not check":** GitHub or the
   remote couldn't be queried, so the blockers weren't checked. Run it again later.
 - **"may not run releases":** only the repository owner can release, unless the
@@ -80,15 +94,51 @@ to try a build before releasing it.
 ## Build locally
 
 ```sh
-npm run dist     # needs gcc, pkg-config, libx11-dev, libxi-dev, libxtst-dev
+npm run dist     # packages for the OS you run it on
 ```
 
-The packages land in `dist/`. CI renders the icon from `assets/icon.svg` first;
-locally, without `build/icons/512x512.png`, the default Electron icon is used:
+It needs the helper toolchain of that OS (README.md, "Run from source"). The packages
+land in `dist/`: the .deb on Linux, both dmgs on macOS, the installer on Windows.
+Building for another OS is not supported. `node scripts/dist.mjs --dir` (after
+`npm run build`) only makes the unpacked app, which is quicker for a test.
+
+CI renders the icons from `assets/icon.svg` first; locally, without them, the default
+Electron icon is used. With `rsvg-convert` installed (Debian/Ubuntu `librsvg2-bin`,
+macOS `brew install librsvg`):
 
 ```sh
-mkdir -p build/icons && rsvg-convert -w 512 -h 512 assets/icon.svg -o build/icons/512x512.png
+scripts/release/render-icons.sh   # build/icons/512x512.png (Linux), build/icon.png (macOS, Windows)
 ```
+
+## Code signing
+
+There are no certificates yet, so releases are unsigned:
+
+- **macOS:** `scripts/dist.mjs` ad-hoc signs the app (every binary in it, the helper
+  included), because an unsigned arm64 binary does not run at all. Gatekeeper still
+  warns on first start, and the Accessibility grant is tied to the exact build, so
+  users may have to grant it again after an update.
+- **Windows:** the installer and the exe are unsigned; SmartScreen warns.
+
+To sign, add these repository secrets (**Settings → Secrets and variables → Actions**).
+The workflow passes them to electron-builder under its standard names; nothing else
+needs to change:
+
+| Secret | For |
+|---|---|
+| `MAC_CSC_LINK` | macOS: a "Developer ID Application" certificate as a base64 `.p12` (becomes `CSC_LINK`). With it, the app is signed with the hardened runtime instead of ad hoc. |
+| `MAC_CSC_KEY_PASSWORD` | macOS: the `.p12` password (`CSC_KEY_PASSWORD`). |
+| `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID` | macOS notarization (an Apple ID with an app-specific password). Without them a signed app is not notarized, and Gatekeeper still warns. |
+| `WIN_CSC_LINK` | Windows: an Authenticode certificate as a base64 `.pfx`. |
+| `WIN_CSC_KEY_PASSWORD` | Windows: its password. |
+
+Locally, set the unprefixed electron-builder variables (`CSC_LINK`, `CSC_KEY_PASSWORD`,
+`APPLE_*`, `WIN_CSC_LINK`, ...) before `npm run dist`. Certificates kept in a cloud HSM
+(most new Windows certificates) need electron-builder's `win.azureSignOptions` or a
+custom `win.signtoolOptions` instead; see the electron-builder docs.
+
+Changing the macOS signing identity (ad hoc → Developer ID) resets users'
+Accessibility grant once.
 
 ## One-time setup
 

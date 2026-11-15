@@ -1,0 +1,8 @@
+# LF everywhere, also in Windows checkouts (CI's windows-latest sets core.autocrlf=true):
+# shell scripts, Makefiles and the test fixtures expect LF.
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.icns binary
+*.exe binary

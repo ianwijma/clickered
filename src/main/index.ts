@@ -18,18 +18,24 @@ const PASS_THROUGH_LINGER_MS = 300
 // Transparent windows on Linux/X11 need an ARGB visual.
 if (process.platform === "linux") app.commandLine.appendSwitch("enable-transparent-visuals")
 
+// Settings live in a lowercase "clickered" folder on every platform (~/.config/clickered,
+// ~/Library/Application Support/clickered, %APPDATA%\clickered), whatever the visible
+// product name is. Must be set before the app is ready (and before the single-instance
+// lock, which lives in userData).
+app.setPath("userData", join(app.getPath("appData"), "clickered"))
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   main()
 }
 
+/** The native helper: native/Makefile (Linux), native/mac (macOS) or native/win (Windows). */
 function helperPath(): string {
   const override = process.env["CLICKERED_HELPER"]
   if (override) return override
-  return app.isPackaged
-    ? join(process.resourcesPath, "clickered-helper")
-    : join(app.getAppPath(), "resources", "clickered-helper")
+  const name = process.platform === "win32" ? "clickered-helper.exe" : "clickered-helper"
+  return app.isPackaged ? join(process.resourcesPath, name) : join(app.getAppPath(), "resources", name)
 }
 
 // Window icon (taskbar, alt-tab, window lists). Electron can't load SVG here, so use the PNG.
@@ -69,10 +75,13 @@ function main(): void {
       maximizable: false,
       minimizable: false,
       fullscreenable: false,
+      // macOS: frameless windows get rounded corners by default, which would clip the
+      // transparent margin around the bar differently than on Linux and Windows.
+      roundedCorners: false,
       skipTaskbar: true,
       alwaysOnTop: true,
       show: false,
-      title: "clickered",
+      title: "Clickered",
       icon: appIconPath(),
       webPreferences: {
         preload: join(__dirname, "../preload/index.js"),
@@ -85,7 +94,11 @@ function main(): void {
     w.webContents.setWindowOpenHandler(() => ({ action: "deny" }))
     w.webContents.on("will-navigate", (e) => e.preventDefault())
     w.setAlwaysOnTop(true, "screen-saver")
-    w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+    // All workspaces (X11), all Spaces incl. fullscreen ones (macOS). Windows has no API
+    // for virtual desktops, so there the bar stays on the desktop it was opened on.
+    // skipTransformProcessType: on macOS the app is already an agent (no Dock icon, see
+    // below); without it Electron briefly hides the window and the Dock to switch types.
+    w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
     w.once("ready-to-show", () => w.showInactive())
     w.on("move", () => {
       const [x, y] = w.getPosition()
@@ -175,6 +188,11 @@ function main(): void {
   })
 
   void app.whenReady().then(async () => {
+    // macOS: like the bar on Linux and Windows (skipTaskbar), no Dock icon and no menu
+    // bar; the bar's own Quit button ends the app. Packaged builds set LSUIElement in
+    // Info.plist (electron-builder.yml) so the icon never even flashes up.
+    if (process.platform === "darwin") app.dock?.hide()
+
     const store = new ConfigStore(
       join(app.getPath("userData"), "config.json"),
       await Effect.runPromise(loadConfig(join(app.getPath("userData"), "config.json"))),

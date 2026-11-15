@@ -1,13 +1,21 @@
 /**
- * Wire protocol between the Electron main process and the native X11 helper
- * (`resources/clickered-helper`). Full prose spec: docs/PROTOCOL.md.
+ * Wire protocol between the Electron main process and the native helper
+ * (`resources/clickered-helper`, `clickered-helper.exe` on Windows; one per OS, same
+ * protocol). Full prose spec: docs/PROTOCOL.md, per-platform differences in its
+ * "Platforms" section.
  *
  * helper -> host : one JSON object per line on stdout (types below)
  * host -> helper : one text command per line on stdin (see `HelperCommand`)
  */
 
-/** X11 window id of a top-level client window (from _NET_CLIENT_LIST). */
+/**
+ * 32-bit id of a top-level client window: an X11 window (from _NET_CLIENT_LIST), a
+ * macOS CGWindowID, or a Windows HWND.
+ */
 export type WindowId = number
+
+/** Protocol version the host speaks; the helper announces its own in `ready`. */
+export const PROTOCOL_VERSION = 2
 
 export interface HelperWindow {
   readonly id: WindowId
@@ -54,15 +62,6 @@ export type HelperMessage =
       readonly y: number
       readonly time: number
     }
-  | {
-      /** Physical key transition; only sent after `keys 1`. */
-      readonly t: "key"
-      readonly down: boolean
-      readonly keycode: number
-      /** Active (focused) client window at the time of the event. */
-      readonly win: WindowId
-      readonly time: number
-    }
   /** Physical Escape press (panic key). Always sent; the helper has already aborted any running seq. */
   | { readonly t: "esc"; readonly time: number }
   | { readonly t: "picked"; readonly win: WindowId }
@@ -79,9 +78,6 @@ export type SeqOp =
   /** Button down / up. */
   | { readonly op: "d"; readonly button: number }
   | { readonly op: "u"; readonly button: number }
-  /** Key down / up (X keycode). */
-  | { readonly op: "kd"; readonly keycode: number }
-  | { readonly op: "ku"; readonly keycode: number }
   /** Sleep, milliseconds. */
   | { readonly op: "s"; readonly ms: number }
   /** Warp pointer to absolute root coordinates. */
@@ -89,7 +85,6 @@ export type SeqOp =
 
 export type HelperCommand =
   | { readonly c: "list" }
-  | { readonly c: "keys"; readonly on: boolean }
   | { readonly c: "pick" }
   | { readonly c: "pickcancel" }
   | { readonly c: "seq"; readonly id: number; readonly ops: ReadonlyArray<SeqOp> }
@@ -106,9 +101,6 @@ export const encodeOp = (o: SeqOp): string => {
     case "d":
     case "u":
       return `${o.op} ${o.button}`
-    case "kd":
-    case "ku":
-      return `${o.op} ${o.keycode}`
     case "s":
       return `s ${Math.max(0, Math.round(o.ms))}`
     case "w":
@@ -124,8 +116,6 @@ export const encodeCommand = (cmd: HelperCommand): string => {
     case "pickcancel":
     case "abort":
       return cmd.c
-    case "keys":
-      return `keys ${cmd.on ? 1 : 0}`
     case "seq":
       return `seq ${cmd.id} ${cmd.ops.map(encodeOp).join(";")}`
   }

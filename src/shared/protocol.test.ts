@@ -7,8 +7,6 @@ describe("encodeOp", () => {
     expect(encodeOp({ op: "m", win: 7, fx: 0.5, fy: 1 })).toBe("m 7 0.50000 1")
     expect(encodeOp({ op: "d", button: 1 })).toBe("d 1")
     expect(encodeOp({ op: "u", button: 3 })).toBe("u 3")
-    expect(encodeOp({ op: "kd", keycode: 38 })).toBe("kd 38")
-    expect(encodeOp({ op: "ku", keycode: 38 })).toBe("ku 38")
     expect(encodeOp({ op: "w", x: 10.4, y: 20.6 })).toBe("w 10 21")
   })
 
@@ -29,8 +27,6 @@ describe("encodeCommand", () => {
     expect(encodeCommand({ c: "pick" })).toBe("pick")
     expect(encodeCommand({ c: "pickcancel" })).toBe("pickcancel")
     expect(encodeCommand({ c: "abort" })).toBe("abort")
-    expect(encodeCommand({ c: "keys", on: true })).toBe("keys 1")
-    expect(encodeCommand({ c: "keys", on: false })).toBe("keys 0")
   })
 
   it("joins seq ops with ';' on a single line", () => {

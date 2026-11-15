@@ -82,7 +82,10 @@ if [[ "$last_tag" == none ]]; then range=HEAD; else range="${last_tag}..HEAD"; f
   echo "- **Version bump:** \`${BUMP}\`, **release type:** \`${RELEASE_TYPE}\`"
   echo "- **Commit:** \`$(git rev-parse --short HEAD)\` on \`${GITHUB_REF_NAME:-HEAD}\`"
   echo "- **Attached to the release:**"
-  echo "  - \`${name}-${VERSION}-amd64.deb\`"
+  echo "  - \`${name}-${VERSION}-amd64.deb\` (Linux x64)"
+  echo "  - \`${name}-${VERSION}-arm64.dmg\` (macOS Apple silicon)"
+  echo "  - \`${name}-${VERSION}-x64.dmg\` (macOS Intel)"
+  echo "  - \`${name}-${VERSION}-x64.exe\` (Windows x64 installer)"
   echo "  - \`SHA256SUMS.txt\`"
   echo
   echo "### Blockers"

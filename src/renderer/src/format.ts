@@ -37,10 +37,12 @@ export function groupName(state: AppState): string {
   return state.groupLabel ?? state.groupClass ?? "app"
 }
 
-export const DRAG_SPEEDS = [1, 1.5, 2, 3] as const
+/** Label of one click-offset choice: "Off" for 0, else the pixel count. */
+export function clickOffsetLabel(px: number): string {
+  return px === 0 ? "Off" : String(px)
+}
 
-export function nearestSpeed(speed: number): number {
-  let best: number = DRAG_SPEEDS[0]
-  for (const s of DRAG_SPEEDS) if (Math.abs(s - speed) < Math.abs(best - speed)) best = s
-  return best
+/** Label of one click-delay choice: "Off" for 0, else the millisecond count. */
+export function clickDelayLabel(ms: number): string {
+  return ms === 0 ? "Off" : String(ms)
 }

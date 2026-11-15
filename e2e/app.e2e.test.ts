@@ -44,6 +44,30 @@ describe("app e2e (Electron, real helper, Xvfb)", () => {
   it("grab two windows from the bar, replicate a click, pause, and quit", async () => {
     const grab = page.getByRole("button", { name: /Grab windows/ })
     await grab.waitFor({ state: "visible", timeout: 15_000 })
+
+    // With no group the bar is at its narrowest; open the panel and check that the window is
+    // resized to fit it and that the six segments of both settings rows are not clipped.
+    await page.getByRole("button", { name: "Windows & settings" }).click()
+    // (A string expression: this file is type-checked without the DOM lib.)
+    await page.waitForFunction(
+      `(() => {
+        const groups = [...document.querySelectorAll('[role="radiogroup"]')]
+        if (groups.length !== 2) return false
+        return groups.every((group) => {
+          const g = group.getBoundingClientRect()
+          const p = group.closest(".surface")?.getBoundingClientRect()
+          const row = group.parentElement
+          const last = group.lastElementChild?.getBoundingClientRect()
+          return !!p && !!row && !!last && g.width > 0 && row.scrollWidth <= row.clientWidth && g.right <= p.right &&
+            last.right <= g.right && group.scrollWidth <= group.clientWidth &&
+            p.right <= window.innerWidth && p.bottom <= window.innerHeight
+        })
+      })()`,
+      undefined,
+      { timeout: 5000 },
+    )
+
+    await page.getByRole("button", { name: "Windows & settings" }).click()
     await grab.click()
     await page.getByText("Click each window…").waitFor()
 
@@ -73,13 +97,33 @@ describe("app e2e (Electron, real helper, Xvfb)", () => {
     expect(wm.on("A", "press")).toHaveLength(2)
     expect(wm.on("B", "press")).toHaveLength(1)
 
+    // Settings panel: the click offset is a radio group (Off by default); removed settings are gone.
+    await page.getByRole("button", { name: "Windows & settings" }).click()
+    const offsets = page.getByRole("radiogroup", { name: "Click offset" }).getByRole("radio")
+    expect(await offsets.allTextContents()).toEqual(["Off", "1", "5", "10", "15", "20"])
+    expect(await page.getByRole("radio", { name: /Click offset off/ }).getAttribute("aria-checked")).toBe("true")
+    await page.getByRole("radio", { name: "Click offset 10 pixels" }).click()
+    await page.locator('[role="radio"][aria-checked="true"][aria-label="Click offset 10 pixels"]').waitFor()
+    // The click delay row sits right below it, same control, in milliseconds.
+    const delays = page.getByRole("radiogroup", { name: "Click delay" }).getByRole("radio")
+    expect(await delays.allTextContents()).toEqual(["Off", "50", "100", "200", "300", "500"])
+    expect(await page.getByRole("radio", { name: /Click delay off/ }).getAttribute("aria-checked")).toBe("true")
+    await page.getByRole("radio", { name: "Click delay 100 milliseconds" }).click()
+    await page.locator('[role="radio"][aria-checked="true"][aria-label="Click delay 100 milliseconds"]').waitFor()
+    expect(
+      await page.evaluate(`(() => {
+        const [o, d] = [...document.querySelectorAll('[role="radiogroup"]')].map((g) => g.parentElement)
+        return o?.nextElementSibling === d
+      })()`),
+    ).toBe(true)
+    expect(await page.getByText("Replicate typing").count()).toBe(0)
+    expect(await page.getByText("Drag speed").count()).toBe(0)
     // Quit from the panel: the app exits.
     const closed = new Promise<void>((r) => app!.process().once("exit", () => r()))
-    await page.getByRole("button", { name: "Windows & settings" }).click()
     // The app can exit before Playwright finishes the click, which rejects with "Target page,
     // context or browser has been closed". That's the outcome we want; `closed` is the assertion.
     await page
-      .getByRole("button", { name: "Quit clickered" })
+      .getByRole("button", { name: "Quit Clickered" })
       .click()
       .catch((e: unknown) => {
         if (!/has been closed/.test(String(e))) throw e

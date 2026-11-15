@@ -1,7 +1,7 @@
 /*
  * clickered-helper — X11 input capture / replay helper for clickered.
  *
- * Spec: docs/PROTOCOL.md (protocol version 1).
+ * Spec: docs/PROTOCOL.md (protocol version 2).
  *   stdout: one JSON object per line (flushed)
  *   stdin : one command per line
  *   stderr: diagnostics
@@ -33,7 +33,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define PROTOCOL_VERSION 1
+#define PROTOCOL_VERSION 2
 #define MOTION_INTERVAL_MS 8
 #define POST_SEQ_SUPPRESS_MS 30
 #define WINDOWS_DEBOUNCE_MS 100
@@ -64,7 +64,6 @@ static int xtest_ids[16];
 static int n_xtest;
 
 /* capture state */
-static int keys_on;
 static unsigned held_mask;      /* physical buttons whose press was reported */
 static Window gesture_win;
 static long long last_motion_ms = -1000;
@@ -646,21 +645,16 @@ static void on_raw_motion(XIRawEvent *ev)
     else motion_pending = 1;
 }
 
-static void on_raw_key(XIRawEvent *ev, int down)
+/* Key presses are only watched for the panic key: a physical Escape aborts the running
+ * seq and is always reported (also during a seq) so the host can drop its queue too.
+ * No other key ever leaves the helper. */
+static void on_raw_key_press(XIRawEvent *ev)
 {
     if (is_xtest(ev->sourceid)) return;
     if (ev->flags & XIKeyRepeat) return;
-    /* Panic key: a physical Escape aborts the running seq and is always reported
-     * (even with `keys 0` and during a seq) so the host can drop its queue too. */
-    if (down && ev->detail == (int)XKeysymToKeycode(dpy, XK_Escape)) {
-        if (seq_running) abort_flag = 1;
-        b_printf(&out, "{\"t\":\"esc\",\"time\":%lld}", now_ms());
-        emit_buf(&out);
-    }
-    if (!keys_on) return;
-    if (input_suppressed()) return;
-    b_printf(&out, "{\"t\":\"key\",\"down\":%s,\"keycode\":%d,\"win\":%lu,\"time\":%lld}",
-             down ? "true" : "false", ev->detail, (unsigned long)get_active(), now_ms());
+    if (ev->detail != (int)XKeysymToKeycode(dpy, XK_Escape)) return;
+    if (seq_running) abort_flag = 1;
+    b_printf(&out, "{\"t\":\"esc\",\"time\":%lld}", now_ms());
     emit_buf(&out);
 }
 
@@ -764,8 +758,7 @@ static void handle_xevent(XEvent *ev)
         case XI_RawButtonPress: on_raw_button(ev->xcookie.data, 1); break;
         case XI_RawButtonRelease: on_raw_button(ev->xcookie.data, 0); break;
         case XI_RawMotion: on_raw_motion(ev->xcookie.data); break;
-        case XI_RawKeyPress: on_raw_key(ev->xcookie.data, 1); break;
-        case XI_RawKeyRelease: on_raw_key(ev->xcookie.data, 0); break;
+        case XI_RawKeyPress: on_raw_key_press(ev->xcookie.data); break;
         case XI_HierarchyChanged: refresh_xtest_devices(); break;
         default: break;
         }
@@ -974,14 +967,13 @@ static int seq_wait(long long ms, Window wait_active)
 /* seq                                                                       */
 
 typedef struct {
-    char op; /* f m d u K(kd) k(ku) s w */
+    char op; /* f m d u s w */
     unsigned long win;
     double fx, fy;
     long a, b;
 } Op;
 
 static unsigned char held_btn[256];
-static unsigned char held_key[256];
 
 static void inject_flush(void)
 {
@@ -1008,11 +1000,6 @@ static void release_all(void)
         if (held_btn[i]) {
             XTestFakeButtonEvent(dpy, (unsigned)i, False, CurrentTime);
             held_btn[i] = 0;
-            any = 1;
-        }
-        if (held_key[i]) {
-            XTestFakeKeyEvent(dpy, (unsigned)i, False, CurrentTime);
-            held_key[i] = 0;
             any = 1;
         }
     }
@@ -1118,10 +1105,6 @@ static int parse_ops(char *s, Op **out_ops, size_t *out_n, char *err, size_t err
             o.op = tok[0][0];
             NUML(1, o.a);
             if (o.a < 1 || o.a > 255) ok = 0;
-        } else if (nt == 2 && (strcmp(tok[0], "kd") == 0 || strcmp(tok[0], "ku") == 0)) {
-            o.op = tok[0][1] == 'd' ? 'K' : 'k';
-            NUML(1, o.a);
-            if (o.a < 8 || o.a > 255) ok = 0;
         } else if (nt == 2 && strcmp(tok[0], "s") == 0) {
             o.op = 's';
             NUML(1, o.a);
@@ -1268,13 +1251,6 @@ static void run_seq(char *args)
             held_btn[o->a] = o->op == 'd';
             inject_flush();
             break;
-        case 'K':
-        case 'k':
-            if (skip) break;
-            XTestFakeKeyEvent(dpy, (unsigned)o->a, o->op == 'K', CurrentTime);
-            held_key[o->a] = o->op == 'K';
-            inject_flush();
-            break;
         case 's':
             if (skip) break;
             seq_wait(o->a, 0);
@@ -1305,11 +1281,6 @@ static void exec_line(char *line)
     if (!*t) return;
     if (strcmp(t, "list") == 0) {
         emit_windows();
-    } else if (strncmp(t, "keys", 4) == 0 && (t[4] == ' ' || t[4] == '\t')) {
-        char *v = trim(t + 5);
-        if (strcmp(v, "0") == 0) keys_on = 0;
-        else if (strcmp(v, "1") == 0) keys_on = 1;
-        else emit_error("bad keys argument");
     } else if (strcmp(t, "pick") == 0) {
         pick_start();
     } else if (strcmp(t, "pickcancel") == 0) {
@@ -1409,7 +1380,6 @@ int main(void)
     XISetMask(m1, XI_RawButtonRelease);
     XISetMask(m1, XI_RawMotion);
     XISetMask(m1, XI_RawKeyPress);
-    XISetMask(m1, XI_RawKeyRelease);
     XISetMask(m2, XI_HierarchyChanged);
     XIEventMask masks[2] = {
         {XIAllMasterDevices, sizeof m1, m1},

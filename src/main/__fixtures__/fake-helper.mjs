@@ -3,9 +3,15 @@
 //
 // env: FAKE_LOG (required)      file that receives one line per stdin command (+ "EOF")
 //      FAKE_WINDOWS             JSON array of HelperWindow
+//      FAKE_VERSION             protocol version announced in `ready` (default 2)
+//      FAKE_STARTUP_ERROR       emit this `error` msg before `ready` (like the macOS helper
+//                               waiting for the Accessibility permission)
+//      FAKE_READY_DELAY         ms before `ready` + the first `windows` (default 0)
 //      FAKE_EVENTS              JSON array of helper messages, emitted after startup
 //      FAKE_EVENTS_DELAY        ms before the first event (default 80), 5 ms apart
 //      FAKE_PICK                comma-separated window ids answered to successive `pick`s (then 0)
+//      FAKE_PICK_WAIT=1         once FAKE_PICK is used up, leave a `pick` unanswered (the user
+//                               has not clicked yet) until `pickcancel`
 //      FAKE_SEQ_DELAY           ms before answering a seq (default 5)
 //      FAKE_SEQ_HANG=1          never answer a seq until `abort`
 //      FAKE_ESC_ON_SEQ          ms into a seq: emit `esc` then `done ok:false` in one write
@@ -20,8 +26,13 @@ const out = (msg) => process.stdout.write(JSON.stringify(msg) + "\n")
 const windows = JSON.parse(process.env.FAKE_WINDOWS ?? "[]")
 const sendWindows = () => out({ t: "windows", active: windows[0]?.id ?? 0, list: windows })
 
-out({ t: "ready", version: 1 })
-sendWindows()
+if (process.env.FAKE_STARTUP_ERROR) out({ t: "error", msg: process.env.FAKE_STARTUP_ERROR })
+const announce = () => {
+  out({ t: "ready", version: Number(process.env.FAKE_VERSION ?? 2) })
+  sendWindows()
+}
+if (process.env.FAKE_READY_DELAY) setTimeout(announce, Number(process.env.FAKE_READY_DELAY))
+else announce()
 process.stdout.write("this line is not json and must be ignored\n")
 process.stderr.write("fake helper up\n")
 
@@ -37,7 +48,10 @@ createInterface({ input: process.stdin })
     log(line)
     const [cmd, arg] = line.split(" ")
     if (cmd === "list") sendWindows()
-    else if (cmd === "pick") setTimeout(() => out({ t: "picked", win: Number(picks.shift() ?? 0) }), 10)
+    else if (cmd === "pick") {
+      if (picks.length === 0 && process.env.FAKE_PICK_WAIT === "1") return
+      setTimeout(() => out({ t: "picked", win: Number(picks.shift() ?? 0) }), 10)
+    }
     else if (cmd === "pickcancel") out({ t: "picked", win: 0 })
     else if (cmd === "seq") {
       const id = Number(arg)

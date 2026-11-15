@@ -14,14 +14,54 @@ concurrency:
 
 jobs:
   unit:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    name: unit (${{ matrix.name }})
+    strategy:
+      # Run every OS to the end: a failure on one should not hide the others.
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+          - name: macOS
+            os: macos-latest
+          - name: Windows
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        # Git Bash on Windows: native/win/Makefile needs a POSIX shell.
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+      - name: Install the X11 build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends pkg-config libx11-dev libxi-dev libxtst-dev
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      # The native helper for this OS: native/Makefile (X11), native/mac (universal,
+      # clang from Xcode) or native/win (the runner's MinGW-w64 gcc). Warnings are
+      # shown as annotations; the build itself fails on errors only.
+      - name: Build the native helper (${{ matrix.name }})
+        run: |
+          case "$RUNNER_OS" in
+            macOS) sw_vers; xcrun clang --version ;;
+            Windows) command -v gcc mingw32-make make || true; gcc --version ;;
+            *) cc --version ;;
+          esac
+          npm run build:helper 2>&1 | tee helper-build.log
+          # Surface compiler warnings as annotations, so a first compile on a new
+          # platform is easy to read.
+          grep -E ': warning: ' helper-build.log | sed 's/^/::warning::/' || true
+      - name: Check the helper binary
+        run: |
+          case "$RUNNER_OS" in
+            macOS) make -C native/mac check; (codesign -dv resources/clickered-helper 2>&1 || true) | sed -n 1,6p ;;
+            Windows) ls -l resources/clickered-helper.exe; (objdump -p resources/clickered-helper.exe || true) | grep 'DLL Name' || true ;;
+            *) ls -l resources/clickered-helper; ldd resources/clickered-helper ;;
+          esac

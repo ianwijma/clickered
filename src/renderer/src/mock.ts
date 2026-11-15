@@ -3,7 +3,7 @@
  * Only loaded when `window.clickered` is missing and `import.meta.env.DEV` is true,
  * so it is never part of a production build.
  *
- *   ?state=empty|picking|waiting|live|paused|busy|partial|error|starting
+ *   ?state=empty|picking|waiting|live|paused|busy|partial|error|starting|permission
  *   ?cycle          step through all states every 2.5 s
  *   ?expanded       open the panel
  *   ?plain          no fake game backdrop
@@ -30,14 +30,23 @@ const base: AppState = {
   windows: windows(4),
   masterMode: "auto",
   masterId: null,
-  replicateKeys: false,
-  dragSpeed: 1,
+  clickOffset: 0,
+  clickDelay: 0,
   hotkey: "Control+`",
   busy: false,
 }
 
 const STATES: Record<string, AppState> = {
   starting: { ...base, helper: "starting", groupClass: null, groupLabel: null, windows: [] },
+  permission: {
+    ...base,
+    helper: "starting",
+    helperError:
+      "Clickered needs the Accessibility permission. Open System Settings > Privacy & Security > Accessibility and turn on Clickered.",
+    groupClass: null,
+    groupLabel: null,
+    windows: [],
+  },
   empty: { ...base, groupClass: null, groupLabel: null, windows: [] },
   picking: { ...base, groupClass: null, groupLabel: null, windows: [], picking: true },
   waiting: { ...base, windows: [] },
@@ -49,8 +58,8 @@ const STATES: Record<string, AppState> = {
     masterMode: "pinned",
     masterId: 0x3a00101,
     windows: windows(4, { 0: { isMaster: false }, 1: { isMaster: true }, 3: { included: false } }),
-    replicateKeys: true,
-    dragSpeed: 1.5,
+    clickOffset: 10,
+    clickDelay: 200,
   },
   error: { ...base, helper: "error", helperError: "XInput2 not available on display :1 (XIQueryVersion failed)" },
 }
@@ -98,12 +107,12 @@ export function installMock(): ClickeredApi {
         masterId: id,
         windows: current.windows.map((w) => ({ ...w, isMaster: id === null ? w.index === 1 : w.id === id })),
       }),
-    setReplicateKeys: (replicateKeys) => set({ replicateKeys }),
-    setDragSpeed: (dragSpeed) => set({ dragSpeed }),
+    setClickOffset: (clickOffset) => set({ clickOffset }),
+    setClickDelay: (clickDelay) => set({ clickDelay }),
     setSize: (width, height) => {
       outline.style.width = `${width}px`
       outline.style.height = `${height}px`
-      document.title = `clickered ${width}x${height}`
+      document.title = `Clickered ${width}x${height}`
     },
     quit: () => console.info("[mock] quit"),
   }

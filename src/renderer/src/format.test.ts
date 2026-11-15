@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
-import type { AppState, GroupWindow } from "@shared/ipc"
-import { countText, formatHotkey, groupName, nearestSpeed } from "./format"
+import { CLICK_DELAYS, CLICK_OFFSETS, type AppState, type GroupWindow } from "@shared/ipc"
+import { clickDelayLabel, clickOffsetLabel, countText, formatHotkey, groupName } from "./format"
 
 const w = (id: number, included = true): GroupWindow => ({ id, index: id, title: `W${id}`, included, isMaster: false })
 const state = (windows: GroupWindow[], label: string | null = null, cls: string | null = null): AppState => ({
@@ -13,8 +13,8 @@ const state = (windows: GroupWindow[], label: string | null = null, cls: string 
   windows,
   masterMode: "auto",
   masterId: null,
-  replicateKeys: false,
-  dragSpeed: 1,
+  clickOffset: 0,
+  clickDelay: 0,
   hotkey: "Control+`",
   busy: false,
 })
@@ -49,13 +49,14 @@ describe("groupName", () => {
   })
 })
 
-describe("nearestSpeed", () => {
-  it("snaps to the closest preset", () => {
-    expect(nearestSpeed(1)).toBe(1)
-    expect(nearestSpeed(1.2)).toBe(1)
-    expect(nearestSpeed(1.4)).toBe(1.5)
-    expect(nearestSpeed(2.4)).toBe(2)
-    expect(nearestSpeed(10)).toBe(3)
-    expect(nearestSpeed(0.25)).toBe(1)
+describe("clickOffsetLabel", () => {
+  it("shows Off for 0 and the pixel count otherwise", () => {
+    expect(CLICK_OFFSETS.map(clickOffsetLabel)).toEqual(["Off", "1", "5", "10", "15", "20"])
+  })
+})
+
+describe("clickDelayLabel", () => {
+  it("shows Off for 0 and the millisecond count otherwise", () => {
+    expect(CLICK_DELAYS.map(clickDelayLabel)).toEqual(["Off", "50", "100", "200", "300", "500"])
   })
 })

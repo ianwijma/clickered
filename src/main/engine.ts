@@ -1,22 +1,22 @@
 /**
- * The replication engine: group tracking, gesture recording, the replay queue, keys,
+ * The replication engine: group tracking, gesture recording, the replay queue,
  * picking — driven by helper messages and renderer commands. All observable state lives
  * in one `SubscriptionRef<Model>`; every change is pushed to the renderer as an
  * `AppState` snapshot (coalesced + deduplicated).
  */
-import { Cause, Duration, Effect, FiberHandle, Queue, Scope, Stream, SubscriptionRef, Exit } from "effect"
+import { Cause, Duration, Effect, Queue, Scope, Stream, SubscriptionRef, Exit } from "effect"
 import type { AppState, GroupWindow, IpcCommand } from "@shared/ipc"
-import type { HelperMessage, HelperWindow, WindowId } from "@shared/protocol"
+import { PROTOCOL_VERSION, type HelperMessage, type HelperWindow, type WindowId } from "@shared/protocol"
 import { timingOf, type ConfigStore } from "./config"
 import { superviseHelper, type Helper, type HelperSpawnOptions } from "./helper"
 import {
   buildScript,
-  clampDragSpeed,
   classify,
   enqueueCoalesced,
   seqTimeout,
+  snapClickDelay,
+  snapClickOffset,
   type Gesture,
-  type KeyEvent,
   type Point,
   type Timing,
 } from "./script"
@@ -37,8 +37,8 @@ export interface Model {
   readonly excluded: ReadonlySet<WindowId>
   readonly masterMode: AppState["masterMode"]
   readonly masterId: WindowId | null
-  readonly replicateKeys: boolean
-  readonly dragSpeed: number
+  readonly clickOffset: number
+  readonly clickDelay: number
   readonly hotkey: string
   readonly busy: boolean
 }
@@ -98,8 +98,8 @@ export const toAppState = (m: Model): AppState => ({
   ),
   masterMode: m.masterMode,
   masterId: m.masterId,
-  replicateKeys: m.replicateKeys,
-  dragSpeed: m.dragSpeed,
+  clickOffset: m.clickOffset,
+  clickDelay: m.clickDelay,
   hotkey: m.hotkey,
   busy: m.busy,
 })
@@ -134,12 +134,14 @@ export interface EngineOptions {
   readonly initialMembers?: ReadonlyArray<WindowId>
   /** Start with replication switched on (default true). */
   readonly enabledOnStart?: boolean
+  /** Random source for click offsets and delays (tests; default `Math.random`). */
+  readonly rng?: () => number
 }
 
 export interface Engine {
   getState(): AppState
   command(cmd: IpcCommand): void
-  /** Hotkey: flip `enabled` (also drops any buffered keys). */
+  /** Hotkey: flip `enabled`. */
   toggleEnabled(): void
   /** Stop everything (helper included). */
   shutdown(): Promise<void>
@@ -149,12 +151,6 @@ interface Recording {
   readonly source: WindowId
   readonly button: number
   readonly points: Point[]
-}
-
-interface KeyBuffer {
-  readonly source: WindowId
-  readonly events: KeyEvent[]
-  readonly held: Set<number>
 }
 
 const log = (msg: string): Effect.Effect<void> => Effect.sync(() => console.log(`[clickered] ${msg}`))
@@ -175,8 +171,8 @@ export const startEngine = (opts: EngineOptions): Engine => {
       excluded: new Set(),
       masterMode: "auto",
       masterId: null,
-      replicateKeys: cfg.replicateKeys,
-      dragSpeed: cfg.dragSpeed,
+      clickOffset: cfg.clickOffset,
+      clickDelay: cfg.clickDelay,
       hotkey: cfg.hotkey,
       busy: false,
     })
@@ -185,13 +181,11 @@ export const startEngine = (opts: EngineOptions): Engine => {
 
     let helper: Helper | null = null
     let rec: Recording | null = null
-    let keyBuf: KeyBuffer | null = null
     let waiting: Gesture[] = []
     /** Window id from a `picked` whose class we did not know yet (waiting for a `windows`). */
     let pickedUnknown: WindowId | null = null
 
     const wake = yield* Queue.sliding<true>(1)
-    const keyTimer = yield* FiberHandle.make<void, never>()
 
     const send = (cmd: Parameters<Helper["send"]>[0]): Effect.Effect<void> =>
       Effect.suspend(() => (helper ? helper.send(cmd) : Effect.void))
@@ -229,7 +223,14 @@ export const startEngine = (opts: EngineOptions): Engine => {
         if (!m.enabled || !h || m.helper !== "ready" || m.picking) return
         // The source may have been excluded or un-pinned while the gesture was queued.
         if (!isSource(m, g.source)) return
-        const ops = buildScript(g, targetsFor(m, g.source), { timing, dragSpeed: m.dragSpeed })
+        const sizes = new Map(m.allWindows.map((w) => [w.id, w] as const))
+        const ops = buildScript(g, targetsFor(m, g.source), {
+          timing,
+          clickOffset: m.clickOffset,
+          clickDelay: m.clickDelay,
+          sizeOf: (id) => sizes.get(id),
+          ...(opts.rng ? { rng: opts.rng } : {}),
+        })
         if (ops.length === 0) return
         yield* Effect.sync(() => opts.onReplay?.(true))
         yield* update((s) => ({ ...s, busy: true }))
@@ -252,60 +253,6 @@ export const startEngine = (opts: EngineOptions): Engine => {
         for (let g = waiting.shift(); g; g = waiting.shift()) yield* replay(g)
       }),
     ).pipe(Effect.forkScoped)
-
-    // --- keys ----------------------------------------------------------------------
-    const dropKeys = (): Effect.Effect<void> =>
-      Effect.gen(function* () {
-        keyBuf = null
-        yield* FiberHandle.clear(keyTimer)
-      })
-
-    /** `fromTimer`: called by the timer fiber itself, which must not interrupt itself. */
-    const flushKeys = (fromTimer = false): Effect.Effect<void> =>
-      Effect.gen(function* () {
-        const buf = keyBuf
-        keyBuf = null
-        if (buf && buf.events.length > 0) yield* enqueue({ kind: "keys", source: buf.source, events: buf.events })
-        if (!fromTimer) yield* FiberHandle.clear(keyTimer)
-      })
-
-    const armKeyTimer = (): Effect.Effect<void> =>
-      FiberHandle.run(
-        keyTimer,
-        Effect.gen(function* () {
-          yield* Effect.sleep(Duration.millis(timing.keyIdleFlush))
-          if (!keyBuf) return
-          if (keyBuf.held.size === 0) return yield* flushKeys(true)
-          // Keys still held: wait for their release; give up if it never comes.
-          yield* Effect.sleep(Duration.millis(Math.max(0, timing.keyStuckTimeout - timing.keyIdleFlush)))
-          yield* log("key buffer dropped (keys held too long)")
-          keyBuf = null
-        }),
-      ).pipe(Effect.asVoid)
-
-    const onKey = (e: Extract<HelperMessage, { t: "key" }>): Effect.Effect<void> =>
-      Effect.gen(function* () {
-        const m = get()
-        if (!m.replicateKeys || !m.enabled || m.helper !== "ready" || m.picking) return
-        // Releases of keys we recorded are accepted from any window (focus may have moved).
-        if (!e.down && keyBuf?.held.has(e.keycode)) {
-          if (keyBuf.events.length + 1 > timing.keyMaxBuffer) return yield* dropKeys()
-          keyBuf.events.push({ down: false, keycode: e.keycode })
-          keyBuf.held.delete(e.keycode)
-          return yield* armKeyTimer()
-        }
-        if (!e.down || !isSource(m, e.win)) return
-        if (keyBuf && keyBuf.source !== e.win) yield* flushKeys()
-        const buf: KeyBuffer = keyBuf ?? { source: e.win, events: [], held: new Set() }
-        keyBuf = buf
-        if (buf.events.length + 1 > timing.keyMaxBuffer) {
-          yield* log("key buffer overflow; dropped")
-          return yield* dropKeys()
-        }
-        buf.events.push({ down: true, keycode: e.keycode })
-        buf.held.add(e.keycode)
-        yield* armKeyTimer()
-      })
 
     // --- mouse recording -----------------------------------------------------------
     const canRecord = (m: Model): boolean => m.enabled && m.helper === "ready" && !m.picking && m.members.size > 0
@@ -363,7 +310,6 @@ export const startEngine = (opts: EngineOptions): Engine => {
     const clearGroup: Effect.Effect<void> = Effect.gen(function* () {
       yield* abortAll("group cleared")
       rec = null
-      yield* dropKeys()
       yield* update((s) => ({ ...s, members: new Set<WindowId>(), excluded: new Set<WindowId>(), masterMode: "auto", masterId: null }))
     })
 
@@ -410,7 +356,6 @@ export const startEngine = (opts: EngineOptions): Engine => {
         // Excluding a window or pinning another master can make an in-progress recording's
         // source ineligible without changing the group itself; forget what it recorded.
         if (rec && !isSource(get(), rec.source)) rec = null
-        if (keyBuf && !isSource(get(), keyBuf.source)) yield* dropKeys()
         return a
       })
 
@@ -419,8 +364,9 @@ export const startEngine = (opts: EngineOptions): Engine => {
         case "ready":
           return Effect.gen(function* () {
             yield* log(`helper ready (protocol v${msg.version})`)
+            if (msg.version !== PROTOCOL_VERSION)
+              yield* log(`warning: helper speaks protocol v${msg.version}, expected v${PROTOCOL_VERSION}; rebuild it`)
             yield* update((s) => ({ ...s, helper: "ready", helperError: null }))
-            if (get().replicateKeys) yield* send({ c: "keys", on: true })
           })
         case "windows":
           return Effect.gen(function* () {
@@ -437,8 +383,6 @@ export const startEngine = (opts: EngineOptions): Engine => {
           return onBtn(msg)
         case "motion":
           return onMotion(msg)
-        case "key":
-          return onKey(msg)
         case "picked":
           return Effect.gen(function* () {
             // 0 = right-click / Done: picking is over. Otherwise toggle the window and keep
@@ -463,7 +407,13 @@ export const startEngine = (opts: EngineOptions): Engine => {
         case "done":
           return Effect.void
         case "error":
-          return log(`helper error: ${msg.msg}`)
+          return Effect.gen(function* () {
+            yield* log(`helper error: ${msg.msg}`)
+            // Before `ready` an error is something the user has to fix while the helper
+            // waits (e.g. the macOS Accessibility permission): show it until `ready`
+            // clears it. Later errors (a rejected command) are only logged.
+            if (get().helper === "starting") yield* update((s) => ({ ...s, helperError: msg.msg }))
+          })
       }
     }
 
@@ -473,7 +423,6 @@ export const startEngine = (opts: EngineOptions): Engine => {
       rec = null
       waiting = []
       pickedUnknown = null
-      yield* dropKeys()
       yield* update((s) => ({ ...s, busy: false, picking: false }))
     })
 
@@ -505,7 +454,6 @@ export const startEngine = (opts: EngineOptions): Engine => {
         if (!on) {
           yield* abortAll("disabled")
           rec = null
-          yield* dropKeys()
         }
         yield* update((s) => ({ ...s, enabled: on }))
       })
@@ -557,18 +505,17 @@ export const startEngine = (opts: EngineOptions): Engine => {
               return { ...s, masterMode: "pinned", masterId: cmd.id, excluded: ex }
             }),
           )
-        case "setReplicateKeys":
+        case "setClickOffset":
           return Effect.gen(function* () {
-            if (!cmd.on) yield* dropKeys()
-            yield* update((s) => ({ ...s, replicateKeys: cmd.on }))
-            opts.config.update({ replicateKeys: cmd.on })
-            yield* send({ c: "keys", on: cmd.on })
+            const px = snapClickOffset(cmd.px)
+            yield* update((s) => ({ ...s, clickOffset: px }))
+            opts.config.update({ clickOffset: px })
           })
-        case "setDragSpeed":
+        case "setClickDelay":
           return Effect.gen(function* () {
-            const speed = clampDragSpeed(cmd.speed)
-            yield* update((s) => ({ ...s, dragSpeed: speed }))
-            opts.config.update({ dragSpeed: speed })
+            const ms = snapClickDelay(cmd.ms)
+            yield* update((s) => ({ ...s, clickDelay: ms }))
+            opts.config.update({ clickDelay: ms })
           })
         case "setSize":
         case "quit":
@@ -579,10 +526,7 @@ export const startEngine = (opts: EngineOptions): Engine => {
     return {
       get,
       command,
-      toggle: Effect.gen(function* () {
-        yield* dropKeys()
-        yield* setEnabled(!get().enabled)
-      }),
+      toggle: Effect.suspend(() => setEnabled(!get().enabled)),
     }
   })
 

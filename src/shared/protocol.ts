@@ -31,6 +31,9 @@ export interface HelperWindow {
   readonly mapped: boolean
 }
 
+/** An OS permission the macOS helper can wait for (System Settings > Privacy & Security). */
+export type HelperPermission = "accessibility" | "input-monitoring"
+
 export type HelperMessage =
   | { readonly t: "ready"; readonly version: number }
   | { readonly t: "windows"; readonly active: WindowId; readonly list: ReadonlyArray<HelperWindow> }
@@ -66,7 +69,8 @@ export type HelperMessage =
   | { readonly t: "esc"; readonly time: number }
   | { readonly t: "picked"; readonly win: WindowId }
   | { readonly t: "done"; readonly id: number; readonly ok: boolean }
-  | { readonly t: "error"; readonly msg: string }
+  /** `perm`: set when the helper is waiting (before `ready`) for this OS permission. */
+  | { readonly t: "error"; readonly msg: string; readonly perm?: HelperPermission }
 
 /** One step of a replay sequence. Serialised by `encodeOp`. */
 export type SeqOp =

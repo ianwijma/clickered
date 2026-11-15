@@ -100,16 +100,19 @@ Startup sequence:
    `AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: true})` once. This
    shows the system prompt.
 2. It then emits once:
-   `{"t":"error","msg":"clickered needs the Accessibility permission … System Settings > Privacy & Security > Accessibility …"}`.
+   `{"t":"error","msg":"clickered needs the Accessibility permission … System Settings > Privacy & Security > Accessibility …","perm":"accessibility"}`.
 3. It checks again about once a second. Meanwhile it services stdin, so EOF exits
    0. Commands sent while waiting are queued and run once the helper is ready.
 4. If creating the event tap fails, the helper calls `CGRequestListenEventAccess()`
-   once, emits one `error` naming *Privacy & Security > Input Monitoring*, and
-   retries every second.
+   once, emits one `error` naming *Privacy & Security > Input Monitoring* (with
+   `"perm":"input-monitoring"`), and retries every second.
 5. Only then does it start the tap and send `ready` (version 2) and `windows`.
 
 The helper never busy-loops and never exits because a permission is missing. The
-host may see `error` lines long before `ready`, and should show them to the user.
+host may see `error` lines long before `ready`, and should show them to the user. The
+`perm` field is what the host keys on (`AppState.permission` "missing" and the bar's
+"Open Settings" chip, which opens the matching System Settings page); the text is
+only for people.
 
 ## Known limits
 

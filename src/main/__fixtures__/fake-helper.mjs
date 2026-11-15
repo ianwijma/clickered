@@ -6,7 +6,10 @@
 //      FAKE_VERSION             protocol version announced in `ready` (default 2)
 //      FAKE_STARTUP_ERROR       emit this `error` msg before `ready` (like the macOS helper
 //                               waiting for the Accessibility permission)
+//      FAKE_STARTUP_PERM        add this `perm` to that error ("accessibility", "input-monitoring")
 //      FAKE_READY_DELAY         ms before `ready` + the first `windows` (default 0)
+//      FAKE_READY_WHEN_FILE     wait until this file exists (polled), then FAKE_READY_DELAY,
+//                               then `ready` (like the user granting the permission)
 //      FAKE_EVENTS              JSON array of helper messages, emitted after startup
 //      FAKE_EVENTS_DELAY        ms before the first event (default 80), 5 ms apart
 //      FAKE_PICK                comma-separated window ids answered to successive `pick`s (then 0)
@@ -18,7 +21,7 @@
 //                               (a physical Escape aborting the replay, like the real helper)
 //      FAKE_EXIT_AFTER          exit(3) after this many ms
 //      FAKE_IGNORE_EOF=1        keep running after stdin closes (tests SIGKILL fallback)
-import { appendFileSync } from "node:fs"
+import { appendFileSync, existsSync } from "node:fs"
 import { createInterface } from "node:readline"
 
 const log = (line) => appendFileSync(process.env.FAKE_LOG, line + "\n")
@@ -26,13 +29,27 @@ const out = (msg) => process.stdout.write(JSON.stringify(msg) + "\n")
 const windows = JSON.parse(process.env.FAKE_WINDOWS ?? "[]")
 const sendWindows = () => out({ t: "windows", active: windows[0]?.id ?? 0, list: windows })
 
-if (process.env.FAKE_STARTUP_ERROR) out({ t: "error", msg: process.env.FAKE_STARTUP_ERROR })
+if (process.env.FAKE_STARTUP_ERROR)
+  out({
+    t: "error",
+    msg: process.env.FAKE_STARTUP_ERROR,
+    ...(process.env.FAKE_STARTUP_PERM ? { perm: process.env.FAKE_STARTUP_PERM } : {}),
+  })
 const announce = () => {
   out({ t: "ready", version: Number(process.env.FAKE_VERSION ?? 2) })
   sendWindows()
 }
-if (process.env.FAKE_READY_DELAY) setTimeout(announce, Number(process.env.FAKE_READY_DELAY))
-else announce()
+const announceAfterDelay = () => {
+  if (process.env.FAKE_READY_DELAY) setTimeout(announce, Number(process.env.FAKE_READY_DELAY))
+  else announce()
+}
+if (process.env.FAKE_READY_WHEN_FILE) {
+  const poll = setInterval(() => {
+    if (!existsSync(process.env.FAKE_READY_WHEN_FILE)) return
+    clearInterval(poll)
+    announceAfterDelay()
+  }, 50)
+} else announceAfterDelay()
 process.stdout.write("this line is not json and must be ignored\n")
 process.stderr.write("fake helper up\n")
 

@@ -1,8 +1,24 @@
 import "./styles.css"
-import { CLICK_DELAYS, CLICK_OFFSETS, type AppState, type ClickeredApi, type GroupWindow } from "@shared/ipc"
+import {
+  CLICK_DELAYS,
+  CLICK_OFFSETS,
+  type AppState,
+  type ClickeredApi,
+  type GroupWindow,
+  type UpdateState,
+} from "@shared/ipc"
 import type { WindowId } from "@shared/protocol"
-import { clickDelayLabel, clickOffsetLabel, countText, formatHotkey, groupName } from "./format"
-import { icon } from "./icons"
+import {
+  chipView,
+  clickDelayLabel,
+  clickOffsetLabel,
+  countText,
+  formatHotkey,
+  groupName,
+  permissionPhaseAfter,
+  type PermissionPhase,
+} from "./format"
+import { appIcon, icon } from "./icons"
 
 // ---------------------------------------------------------------------------
 // Tiny DOM helpers. The DOM is built once; render() only patches it.
@@ -80,6 +96,7 @@ const ICON_BTN =
 
 function start(api: ClickeredApi): void {
   let state: AppState | null = null
+  let update: UpdateState = { status: "none" }
   let expanded = import.meta.env.DEV && new URLSearchParams(location.search).has("expanded")
 
   const app = document.getElementById("app") ?? document.body
@@ -186,6 +203,90 @@ function start(api: ClickeredApi): void {
     chevron,
   )
 
+  // ---- Chip: one small notice (permission or update) between the pill and the panel ----
+
+  // Compact layers are content-sized (measured, so the chip's width can be animated); the
+  // update-progress layer fills the chip. Inactive layers are invisible and unfocusable.
+  const LAYER =
+    "invisible absolute inset-y-0 left-0 flex items-center gap-2 whitespace-nowrap opacity-0 transition-[opacity,visibility] duration-[180ms] data-active:visible data-active:opacity-100"
+  const CHIP_BTN =
+    "h-[22px] shrink-0 rounded-full px-2.5 text-xs font-semibold whitespace-nowrap"
+  const BTN_GO = `${CHIP_BTN} bg-emerald-600 text-white hover:bg-emerald-500 active:bg-emerald-700 dark:bg-emerald-500 dark:text-emerald-950 dark:hover:bg-emerald-400`
+  const BTN_NEUTRAL = `${CHIP_BTN} bg-zinc-900/[.07] text-zinc-700 hover:bg-zinc-900/[.12] active:bg-zinc-900/[.16] dark:bg-white/10 dark:text-zinc-300 dark:hover:bg-white/15 dark:active:bg-white/20`
+  const BTN_SKY = `${CHIP_BTN} bg-sky-600 text-white hover:bg-sky-500 active:bg-sky-700 dark:bg-sky-500 dark:text-sky-950 dark:hover:bg-sky-400`
+
+  // Update available / failed (same layout: dot, text, button)
+  const updDot = el("span", "size-2 shrink-0 rounded-full bg-emerald-500")
+  const updText = el("span", "min-w-0 flex-1")
+  const updBtn = button(BTN_GO, "Install")
+  updBtn.append("Install")
+  const layerUpdate = el("div", `${LAYER} w-max pr-1 pl-3`, updDot, updText, updBtn)
+
+  // Update in progress
+  const workTitle = el("div", "truncate text-[13px] font-semibold leading-[1.3]")
+  const workSub = el("div", `truncate leading-[1.35] ${MUTED}`)
+  const workFill = el("i", "block h-full rounded-full bg-emerald-500 transition-[width] duration-200")
+  const workBar = el("div", "mt-1.5 h-1 overflow-hidden rounded-full bg-zinc-900/10 dark:bg-white/10", workFill)
+  workBar.setAttribute("role", "progressbar")
+  workBar.setAttribute("aria-label", "Update progress")
+  workBar.setAttribute("aria-valuemin", "0")
+  workBar.setAttribute("aria-valuemax", "100")
+  const layerWork = el(
+    "div",
+    `${LAYER} right-0 gap-2.5 pr-3.5 pl-2.5 data-active:delay-200`,
+    appIcon("size-10 shrink-0"),
+    el("div", "min-w-0 flex-1", workTitle, workSub, workBar),
+  )
+
+  // Permission: missing / waiting / granted
+  const permText = el("span", "min-w-0 flex-1")
+  const permBtn = button(BTN_SKY, "Open System Settings to grant the permission")
+  permBtn.append("Open Settings")
+  const layerPerm = el(
+    "div",
+    `${LAYER} w-max gap-2 pr-1 pl-[9px]`,
+    el("span", "shrink-0 text-amber-600 dark:text-amber-300", icon("lock", "size-[15px]")),
+    permText,
+    permBtn,
+  )
+  const waitBtn = el(
+    "button",
+    "min-w-0 flex-1 text-left hover:underline",
+    "Waiting for Accessibility permission…",
+  )
+  waitBtn.type = "button"
+  waitBtn.title = "Open System Settings again"
+  const layerWait = el(
+    "div",
+    `${LAYER} w-max gap-2 pr-3 pl-[9px]`,
+    el(
+      "span",
+      "size-3.5 shrink-0 animate-[spin_.8s_linear_infinite] rounded-full border-2 border-zinc-900/15 border-t-sky-600 dark:border-white/20 dark:border-t-sky-300",
+    ),
+    waitBtn,
+  )
+  const layerOk = el(
+    "div",
+    `${LAYER} w-max gap-2 pr-3 pl-[9px]`,
+    el("span", "shrink-0 text-emerald-600 dark:text-emerald-400", icon("check", "size-[15px]")),
+    el("span", "min-w-0 flex-1", "Permission granted"),
+  )
+
+  const layers = [layerUpdate, layerWork, layerPerm, layerWait, layerOk]
+  const chip = el(
+    "div",
+    "surface relative h-[30px] max-w-full shrink-0 overflow-hidden rounded-[15px] text-xs transition-[width,height,border-radius,opacity,border-width] duration-[380ms] ease-[cubic-bezier(.3,1.2,.4,1)] data-expanded:h-[62px] data-expanded:rounded-[20px] group-data-leaving:h-0 group-data-leaving:border-0 group-data-leaving:opacity-0",
+    ...layers,
+  )
+  chip.setAttribute("aria-live", "polite")
+  // width:0 + min-width:100% (like the panel): the chip never widens the root.
+  const chipBox = el(
+    "div",
+    "group flex w-0 min-w-full justify-center transition-[margin] duration-[380ms] data-leaving:-mt-1.5",
+    chip,
+  )
+  chipBox.hidden = true
+
   // ---- Panel ---------------------------------------------------------------
 
   const errorBox = el(
@@ -267,7 +368,7 @@ function start(api: ClickeredApi): void {
     el("div", "flex items-center gap-0.5", hotkeyHint, forgetBtn, quitBtn),
   )
 
-  const root = el("div", "replay-fade inline-flex w-max flex-col gap-1.5 p-2.5 font-sans antialiased", bar, panel)
+  const root = el("div", "replay-fade inline-flex w-max flex-col gap-1.5 p-2.5 font-sans antialiased", bar, chipBox, panel)
   app.replaceChildren(root)
 
   // ---- Window rows -------------------------------------------------------
@@ -345,6 +446,103 @@ function start(api: ClickeredApi): void {
     }
   }
 
+  // ---- Chip: state and render --------------------------------------------
+
+  let permPhase: PermissionPhase = "idle"
+  let permPrev: AppState["permission"] | null = null
+  let permLeaving = false
+  let permTimers: ReturnType<typeof setTimeout>[] = []
+
+  function applyState(s: AppState): void {
+    const next = permissionPhaseAfter(permPhase, permPrev, s.permission)
+    permPrev = s.permission
+    if (next === "granted" && permPhase !== "granted") {
+      // Show "Permission granted" for a moment, then collapse the chip away.
+      permTimers.push(
+        setTimeout(() => {
+          permLeaving = true
+          renderChip()
+        }, 1700),
+        setTimeout(() => {
+          permPhase = "idle"
+          permLeaving = false
+          renderChip()
+        }, 2100),
+      )
+    } else if (next !== "granted" && permPhase === "granted") {
+      permTimers.forEach(clearTimeout)
+      permTimers = []
+      permLeaving = false
+    }
+    permPhase = next
+    state = s
+    render()
+  }
+
+  const setLayers = (active: HTMLElement | null): void => {
+    for (const l of layers) setFlag(l, "data-active", l === active)
+  }
+
+  function renderChip(): void {
+    const view = chipView(update, state, permPhase)
+    const visible = view.kind !== "none"
+    const wasHidden = chipBox.hidden
+    show(chipBox, visible)
+    if (!visible) return
+    if (wasHidden) {
+      chip.classList.remove("panel-in")
+      void chip.offsetWidth
+      chip.classList.add("panel-in")
+    }
+    setFlag(chipBox, "data-leaving", permLeaving)
+    setFlag(chip, "data-expanded", view.kind === "update-progress")
+
+    let layer: HTMLElement
+    switch (view.kind) {
+      case "update-progress": {
+        layer = layerWork
+        setText(workTitle, view.title)
+        setText(workSub, view.sub)
+        const determinate = view.progress !== null
+        workFill.className = `block h-full rounded-full bg-emerald-500 ${determinate ? "transition-[width] duration-200" : "bar-slide"}`
+        workFill.style.width = determinate ? `${view.progress}%` : "35%"
+        setAttr(workBar, "aria-valuenow", determinate ? String(view.progress) : null)
+        setAttr(workBar, "aria-valuetext", determinate ? null : view.sub)
+        break
+      }
+      case "update-available":
+      case "update-failed": {
+        layer = layerUpdate
+        const failed = view.kind === "update-failed"
+        setText(updText, view.text)
+        updDot.className = `size-2 shrink-0 rounded-full ${failed ? "bg-red-500" : "bg-emerald-500"}`
+        const label = failed ? "Retry" : "Install"
+        if (updBtn.textContent !== label) {
+          updBtn.textContent = label
+          updBtn.className = failed ? BTN_NEUTRAL : BTN_GO
+        }
+        const tip = failed ? view.message : null
+        setAttr(layerUpdate, "title", tip)
+        setAttr(updBtn, "title", failed ? "Download and install the update again" : "Download and install the update")
+        setAttr(updBtn, "aria-label", failed ? "Retry the update" : "Install the update")
+        break
+      }
+      case "permission-missing":
+        layer = layerPerm
+        setText(permText, view.text)
+        break
+      case "permission-waiting":
+        layer = layerWait
+        break
+      default:
+        layer = layerOk
+    }
+    setLayers(layer)
+    // Compact chips are as wide as their content; the progress chip as wide as the bar.
+    const width = view.kind === "update-progress" ? "100%" : `${layer.offsetWidth + 2}px`
+    if (chip.style.width !== width) chip.style.width = width
+  }
+
   // ---- Render ------------------------------------------------------------
 
   type Mode = "starting" | "error" | "picking" | "empty" | "group"
@@ -359,6 +557,7 @@ function start(api: ClickeredApi): void {
 
   /** The startup error the panel was last opened for (see render). */
   let shownStartupError: string | null = null
+  let autoOpened = false
 
   function render(): void {
     const s = state
@@ -368,8 +567,16 @@ function start(api: ClickeredApi): void {
     // close it again once the helper is ready.
     const startupError = mode === "starting" ? (s?.helperError ?? null) : null
     if (startupError !== shownStartupError) {
-      if (startupError !== null) expanded = true
-      else if (shownStartupError !== null) expanded = false
+      // A missing permission is carried by the chip, so it does not open the panel.
+      if (startupError !== null) {
+        if (s?.permission !== "missing") {
+          expanded = true
+          autoOpened = true
+        }
+      } else if (shownStartupError !== null && autoOpened) {
+        expanded = false
+        autoOpened = false
+      }
       shownStartupError = startupError
     }
     const alert = mode === "error" || startupError !== null
@@ -403,6 +610,8 @@ function start(api: ClickeredApi): void {
       statusText.className = `truncate ${MUTED}`
       setAttr(segStatus, "title", null)
     }
+
+    renderChip()
 
     // panel
     show(panel, expanded)
@@ -488,6 +697,13 @@ function start(api: ClickeredApi): void {
     }
     render()
   })
+  updBtn.addEventListener("click", () => api.installUpdate())
+  permBtn.addEventListener("click", () => {
+    permPhase = "waiting"
+    api.openPermissionSettings()
+    renderChip()
+  })
+  waitBtn.addEventListener("click", () => api.openPermissionSettings())
   forgetBtn.addEventListener("click", () => api.clearGroup())
   quitBtn.addEventListener("click", () => api.quit())
 
@@ -522,14 +738,20 @@ function start(api: ClickeredApi): void {
   render()
   report()
 
-  api.onState((s) => {
-    state = s
-    render()
-  })
+  api.onState(applyState)
   void api.getState().then((s) => {
-    if (state === null) {
-      state = s
-      render()
+    if (state === null) applyState(s)
+  })
+  let updateSeen = false
+  api.onUpdate((u) => {
+    updateSeen = true
+    update = u
+    renderChip()
+  })
+  void api.getUpdate().then((u) => {
+    if (!updateSeen) {
+      update = u
+      renderChip()
     }
   })
 }

@@ -10,6 +10,14 @@ describe("parseCommand", () => {
     expect(parseCommand({ c: "setSize", width: 400, height: 60 })).toEqual({ c: "setSize", width: 400, height: 60 })
     expect(parseCommand({ c: "setClickOffset", px: 5 })).toEqual({ c: "setClickOffset", px: 5 })
     expect(parseCommand({ c: "setClickDelay", ms: 100 })).toEqual({ c: "setClickDelay", ms: 100 })
+    expect(parseCommand({ c: "installUpdate" })).toEqual({ c: "installUpdate" })
+    expect(parseCommand({ c: "openPermissionSettings" })).toEqual({ c: "openPermissionSettings" })
+  })
+
+  it("drops every payload of the update and permission commands", () => {
+    // Nothing from the renderer may choose what is downloaded or which page is opened.
+    expect(parseCommand({ c: "installUpdate", url: "https://evil.example/x.deb", version: "9.9.9" })).toEqual({ c: "installUpdate" })
+    expect(parseCommand({ c: "openPermissionSettings", url: "file:///etc/passwd" })).toEqual({ c: "openPermissionSettings" })
   })
 
   it("drops extra fields", () => {
@@ -34,6 +42,10 @@ describe("parseCommand", () => {
       { c: "setClickDelay", ms: "100" },
       { c: "setClickDelay", px: 100 },
       { c: "setSize", width: Infinity, height: 10 },
+      { c: "InstallUpdate" },
+      { c: "installupdate" },
+      { c: ["installUpdate"] },
+      { c: "openPermissionSettings ", url: "x" },
     ]) {
       expect(parseCommand(bad)).toBeNull()
     }

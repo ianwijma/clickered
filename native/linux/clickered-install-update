@@ -1,0 +1,75 @@
+#!/bin/sh
+# Installs a Clickered update as root. Shipped in the .deb as
+# /opt/Clickered/resources/clickered-install-update (root:root, 0755) and run by the app as
+#
+#   pkexec /opt/Clickered/resources/clickered-install-update <absolute .deb path> <sha256>
+#
+# The .deb was downloaded and verified by the app, but it lives in the user's home, where
+# any process of that user could replace it while the password prompt is open. So this
+# script, running as root, copies it into a fresh root-only directory first, checks the
+# SHA-256 of THAT copy against the hash the app verified, and only then installs the copy
+# with apt-get (which also pulls in new dependencies).
+#
+# Exit codes (src/main/update-install.ts maps them to messages):
+#   0     installed
+#   64    bad arguments
+#   65    the copy's SHA-256 is not the expected one
+#   66    a required tool is missing
+#   67    the file could not be copied
+#   other apt-get's own exit code (100 = error)
+# pkexec itself exits 126 (prompt dismissed) or 127 (not authorized / no agent); this
+# script never uses those.
+set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+umask 077
+unset IFS 2>/dev/null || true
+export DEBIAN_FRONTEND=noninteractive
+
+die() {
+  code=$1
+  shift
+  echo "clickered-install-update: $*" >&2
+  exit "$code"
+}
+
+[ "$#" -eq 2 ] || die 64 "usage: clickered-install-update <absolute .deb path> <sha256>"
+deb=$1
+want=$2
+
+case $deb in
+  /*.deb) ;;
+  *) die 64 "the package path must be absolute and end in .deb" ;;
+esac
+case $deb in
+  *[!A-Za-z0-9._/+@-]*) die 64 "unexpected characters in the package path" ;;
+esac
+case /$deb/ in
+  */../* | */./*) die 64 "the package path must not contain . or .. components" ;;
+esac
+[ "${#want}" -eq 64 ] || die 64 "the checksum must be 64 lowercase hex digits"
+case $want in
+  *[!0-9a-f]*) die 64 "the checksum must be 64 lowercase hex digits" ;;
+esac
+
+for tool in mktemp cp chmod sha256sum apt-get rm; do
+  command -v "$tool" >/dev/null 2>&1 || die 66 "$tool not found"
+done
+
+tmp=$(mktemp -d /tmp/clickered-update.XXXXXXXXXX) || die 67 "cannot create a temporary directory"
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 130' HUP INT TERM
+
+copy=$tmp/clickered-update.deb
+cp -- "$deb" "$copy" 2>/dev/null || die 67 "cannot read $deb"
+
+got=$(sha256sum -- "$copy") || die 65 "cannot hash the copy"
+got=${got%% *}
+[ "$got" = "$want" ] || die 65 "checksum mismatch: expected $want, got $got"
+
+# Readable (not writable) for apt's unprivileged download user `_apt`, so apt does not
+# fall back to reading it as root with a notice. Only root can change it from here on.
+chmod 0755 "$tmp"
+chmod 0644 "$copy"
+
+apt-get install -y "$copy"

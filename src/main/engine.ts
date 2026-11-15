@@ -125,6 +125,11 @@ export interface EngineOptions {
   readonly helper: HelperSpawnOptions
   /** Called with every (deduplicated, coalesced) state snapshot. */
   readonly onState: (state: AppState) => void
+  /**
+   * Called synchronously right before a replay starts (true) and after it ends (false),
+   * without the debounce `onState` has, so the bar can get out of the way in time.
+   */
+  readonly onReplay?: (active: boolean) => void
   /** Windows that start out in the group (tests; normally the user picks them). */
   readonly initialMembers?: ReadonlyArray<WindowId>
   /** Start with replication switched on (default true). */
@@ -227,6 +232,7 @@ export const startEngine = (opts: EngineOptions): Engine => {
           ...(opts.rng ? { rng: opts.rng } : {}),
         })
         if (ops.length === 0) return
+        yield* Effect.sync(() => opts.onReplay?.(true))
         yield* update((s) => ({ ...s, busy: true }))
         yield* h.runSeq(ops, seqTimeout(ops, timing)).pipe(
           Effect.catchTags({
@@ -235,7 +241,9 @@ export const startEngine = (opts: EngineOptions): Engine => {
             SeqEscaped: () => pauseOnEscape,
           }),
           Effect.asVoid,
-          Effect.ensuring(update((s) => ({ ...s, busy: false }))),
+          Effect.ensuring(
+            update((s) => ({ ...s, busy: false })).pipe(Effect.andThen(Effect.sync(() => opts.onReplay?.(false)))),
+          ),
         )
       })
 

@@ -54,6 +54,7 @@ const setup = (opts: {
   env?: Record<string, string>
   members?: number[]
   rng?: () => number
+  onReplay?: (active: boolean) => void
 }) => {
   const fake = fakeHelper({
     FAKE_WINDOWS: JSON.stringify(WINDOWS),
@@ -69,6 +70,7 @@ const setup = (opts: {
     initialMembers: opts.members ?? [10, 20, 30],
     onState: (s) => states.push(s),
     ...(opts.rng ? { rng: opts.rng } : {}),
+    ...(opts.onReplay ? { onReplay: opts.onReplay } : {}),
   })
   engines.push(engine)
   const seqs = () => fake.log().filter((l) => l.startsWith("seq "))
@@ -102,6 +104,20 @@ describe("engine (fake helper)", () => {
     )
     await waitFor(() => engine.getState().masterId === 20 && !engine.getState().busy)
     expect(engine.getState().windows.find((w) => w.isMaster)?.id).toBe(20)
+  })
+
+  it("signals replay start and end around a seq (bar goes click-through)", async () => {
+    const calls: Array<[boolean, number]> = []
+    const { engine, seqs } = setup({
+      events: [btn(true, 1, 20, 0.5, 0.25, 1020, 383, 1000), btn(false, 1, 20, 0.5, 0.25, 1021, 383, 1060)],
+      onReplay: (active) => calls.push([active, seqs().length]),
+    })
+    await waitFor(() => calls.length === 2 && !engine.getState().busy)
+    // Started before the seq reached the helper, ended after it.
+    expect(calls).toEqual([
+      [true, 0],
+      [false, 1],
+    ])
   })
 
   it("replays a drag", async () => {
@@ -186,10 +202,11 @@ describe("engine (fake helper)", () => {
     await waitFor(() => engine.getState().windows.length === 1)
     engine.command({ c: "cancelPick" })
     await waitFor(() => !engine.getState().picking)
-    await sleep(60)
+    // The fake helper is a separate process: wait for it to log the command rather than
+    // assuming it has after a fixed delay (flaky on slow CI runners).
+    await waitFor(() => fake.log().includes("pickcancel"))
     expect(engine.getState().picking).toBe(false)
     expect(engine.getState().windows.map((w) => w.id)).toEqual([10])
-    expect(fake.log()).toContain("pickcancel")
   })
 
   it("shifts each target by its own random click offset, converted with that window's size", async () => {

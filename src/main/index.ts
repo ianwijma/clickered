@@ -12,6 +12,8 @@ import { startEngine, type Engine } from "./engine"
 
 const INITIAL_SIZE = { width: 420, height: 64 }
 const SIZE_LIMITS = { minW: 80, maxW: 1600, minH: 24, maxH: 1200 }
+/** Keep the bar click-through this long after a replay, so back-to-back replays don't flicker it. */
+const PASS_THROUGH_LINGER_MS = 300
 
 // Transparent windows on Linux/X11 need an ARGB visual.
 if (process.platform === "linux") app.commandLine.appendSwitch("enable-transparent-visuals")
@@ -123,6 +125,27 @@ function main(): void {
     win.setResizable(false)
   }
 
+  // While a replay runs, the bar ignores the mouse entirely: replayed clicks land at absolute
+  // screen positions and would otherwise hit the bar wherever it overlaps a target window.
+  let passThrough = false
+  let passThroughTimer: ReturnType<typeof setTimeout> | null = null
+  const applyPassThrough = (on: boolean): void => {
+    passThrough = on
+    if (win && !win.isDestroyed()) win.setIgnoreMouseEvents(on)
+  }
+  const onReplay = (active: boolean): void => {
+    if (passThroughTimer) clearTimeout(passThroughTimer)
+    passThroughTimer = null
+    if (active) {
+      if (!passThrough) applyPassThrough(true)
+    } else {
+      passThroughTimer = setTimeout(() => {
+        passThroughTimer = null
+        applyPassThrough(false)
+      }, PASS_THROUGH_LINGER_MS)
+    }
+  }
+
   app.on("second-instance", () => win?.showInactive())
 
   // Only the bar window's own top-level page may talk to main.
@@ -185,6 +208,7 @@ function main(): void {
       onState: (s) => {
         if (win && !win.isDestroyed()) win.webContents.send(IPC.state, s)
       },
+      onReplay,
     })
 
     const hotkey = store.get().hotkey

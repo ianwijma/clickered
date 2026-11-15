@@ -196,10 +196,14 @@ describe("engine (fake helper)", () => {
   })
 
   it("Done stops picking and keeps what was picked", async () => {
-    const { engine, fake } = setup({ members: [], env: { FAKE_PICK: "10" } })
+    // FAKE_PICK_WAIT: after the first pick the fake waits for the next click instead of
+    // answering "cancelled", so picking is still on when Done is pressed (otherwise it is a
+    // race between the test and the fake, lost on slow runners).
+    const { engine, fake } = setup({ members: [], env: { FAKE_PICK: "10", FAKE_PICK_WAIT: "1" } })
     await waitFor(() => engine.getState().helper === "ready")
     engine.command({ c: "startPick" })
     await waitFor(() => engine.getState().windows.length === 1)
+    expect(engine.getState().picking).toBe(true)
     engine.command({ c: "cancelPick" })
     await waitFor(() => !engine.getState().picking)
     // The fake helper is a separate process: wait for it to log the command rather than

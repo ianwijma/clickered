@@ -10,6 +10,8 @@
 //      FAKE_EVENTS              JSON array of helper messages, emitted after startup
 //      FAKE_EVENTS_DELAY        ms before the first event (default 80), 5 ms apart
 //      FAKE_PICK                comma-separated window ids answered to successive `pick`s (then 0)
+//      FAKE_PICK_WAIT=1         once FAKE_PICK is used up, leave a `pick` unanswered (the user
+//                               has not clicked yet) until `pickcancel`
 //      FAKE_SEQ_DELAY           ms before answering a seq (default 5)
 //      FAKE_SEQ_HANG=1          never answer a seq until `abort`
 //      FAKE_ESC_ON_SEQ          ms into a seq: emit `esc` then `done ok:false` in one write
@@ -46,7 +48,10 @@ createInterface({ input: process.stdin })
     log(line)
     const [cmd, arg] = line.split(" ")
     if (cmd === "list") sendWindows()
-    else if (cmd === "pick") setTimeout(() => out({ t: "picked", win: Number(picks.shift() ?? 0) }), 10)
+    else if (cmd === "pick") {
+      if (picks.length === 0 && process.env.FAKE_PICK_WAIT === "1") return
+      setTimeout(() => out({ t: "picked", win: Number(picks.shift() ?? 0) }), 10)
+    }
     else if (cmd === "pickcancel") out({ t: "picked", win: 0 })
     else if (cmd === "seq") {
       const id = Number(arg)

@@ -6,14 +6,23 @@
 #
 # Environment:
 #   TAG         the release tag (already pushed)
+#   VERSION     the version being released (file names contain it)
 #   PRERELEASE  true|false
 #   GH_TOKEN    for the gh CLI, with contents: write
 set -euo pipefail
 
-: "${TAG:?}" "${PRERELEASE:?}"
+: "${TAG:?}" "${VERSION:?}" "${PRERELEASE:?}"
 cd "$(dirname "$0")/../.."
 
-files=(dist/*.deb dist/SHA256SUMS.txt)
+name="$(node -p "require('./package.json').name")"
+# The files checked by scripts/release/collect-files.sh.
+files=(
+  "dist/${name}-${VERSION}-amd64.deb"
+  "dist/${name}-${VERSION}-arm64.dmg"
+  "dist/${name}-${VERSION}-x64.dmg"
+  "dist/${name}-${VERSION}-x64.exe"
+  dist/SHA256SUMS.txt
+)
 if [[ "$PRERELEASE" == "true" ]]; then kind=(--prerelease); else kind=(--latest); fi
 
 # `gh release create` with files makes a draft, uploads to it, then publishes it.

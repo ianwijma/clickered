@@ -7,7 +7,7 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { dirname } from "node:path"
 import { Data, Effect } from "effect"
-import { DEFAULT_TIMING, clampDragSpeed, type Timing } from "./script"
+import { DEFAULT_TIMING, snapClickDelay, snapClickOffset, type Timing } from "./script"
 
 export interface BarPosition {
   readonly x: number
@@ -17,8 +17,10 @@ export interface BarPosition {
 export interface Config {
   readonly groupClass: string | null
   readonly groupLabel: string | null
-  readonly replicateKeys: boolean
-  readonly dragSpeed: number
+  /** Click offset radius in pixels (one of `CLICK_OFFSETS`). */
+  readonly clickOffset: number
+  /** Maximum random pause in ms before each target window (one of `CLICK_DELAYS`). */
+  readonly clickDelay: number
   readonly hotkey: string
   readonly bar: BarPosition | null
   /** Overrides for individual timing constants (unknown/invalid keys are ignored). */
@@ -30,8 +32,8 @@ export const DEFAULT_HOTKEY = "Control+`"
 export const DEFAULT_CONFIG: Config = {
   groupClass: null,
   groupLabel: null,
-  replicateKeys: false,
-  dragSpeed: 1,
+  clickOffset: 0,
+  clickDelay: 0,
   hotkey: DEFAULT_HOTKEY,
   bar: null,
   timing: {},
@@ -43,7 +45,11 @@ const isObj = (u: unknown): u is Record<string, unknown> => typeof u === "object
 const str = (u: unknown): string | null => (typeof u === "string" && u.length > 0 ? u : null)
 const finite = (u: unknown): number | null => (typeof u === "number" && Number.isFinite(u) ? u : null)
 
-/** Turn arbitrary parsed JSON into a valid Config, keeping every field that is valid. */
+/**
+ * Turn arbitrary parsed JSON into a valid Config, keeping every field that is valid.
+ * Fields this version no longer has (e.g. `replicateKeys`, `dragSpeed`, the old key
+ * timing constants) are silently dropped.
+ */
 export const sanitizeConfig = (raw: unknown): Config => {
   if (!isObj(raw)) return DEFAULT_CONFIG
   const groupClass = str(raw["groupClass"])
@@ -58,12 +64,11 @@ export const sanitizeConfig = (raw: unknown): Config => {
       if (v !== null && v >= 0) timing[key] = v
     }
   }
-  const speed = finite(raw["dragSpeed"])
   return {
     groupClass,
     groupLabel: groupClass ? str(raw["groupLabel"]) : null,
-    replicateKeys: raw["replicateKeys"] === true,
-    dragSpeed: speed === null ? 1 : clampDragSpeed(speed),
+    clickOffset: snapClickOffset(raw["clickOffset"]),
+    clickDelay: snapClickDelay(raw["clickDelay"]),
     hotkey: str(raw["hotkey"]) ?? DEFAULT_HOTKEY,
     bar: bx !== null && by !== null ? { x: Math.round(bx), y: Math.round(by) } : null,
     timing,

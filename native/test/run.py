@@ -90,7 +90,7 @@ def buttons_down():
 
 h, hr = start()
 got, win = hr.until(lambda m: m["t"] == "windows")
-check(got[0] == {"t": "ready", "version": 1}, "ready first")
+check(got[0] == {"t": "ready", "version": 2}, "ready first")
 byid = {w["id"]: w for w in win["list"]}
 check((byid[A]["x"], byid[A]["y"], byid[A]["w"], byid[A]["h"]) == (4, 30, 632, 374),
       "A content rect = wine-style child 632x374+4+30: %r" % byid[A])
@@ -121,16 +121,28 @@ if PHYS:
     phys("m", 1200, 700); phys("b", 3, 1); phys("m", 100, 100); phys("b", 3, 0)
     btns = [m for m in hr.lines(0.3) if m["t"] == "btn"]
     check(len(btns) == 2 and all(m["win"] == 0 and m["fx"] == 0 for m in btns), "press over no client: win 0")
-    # keys
+    # keys: only the panic key (Escape) is ever reported, and only physical presses of it
+    ESC = 9  # Xvfb's default keymap
     phys("k", 38, 1); phys("k", 38, 0)
-    check(not [m for m in hr.lines(0.2) if m["t"] == "key"], "keys off by default")
-    send(h, "keys 1")
-    phys("k", 38, 1); phys("k", 38, 0)
-    subprocess.run(["xdotool", "key", "a"])
-    keys = [m for m in hr.lines(0.3) if m["t"] == "key"]
-    check(len(keys) == 2 and keys[0]["keycode"] == 38 and keys[0]["down"] and keys[0]["win"] == C,
-          "physical keys reported after keys 1, XTEST keys not: %r" % keys)
-    send(h, "keys 0")
+    got = hr.lines(0.2)
+    check(not got, "ordinary physical keys never reported: %r" % got)
+    send(h, "keys 1")  # removed in protocol v2
+    got = hr.lines(0.2)
+    check([m["t"] for m in got] == ["error"], "keys command rejected: %r" % got)
+    phys("k", ESC, 1); phys("k", ESC, 0)
+    subprocess.run(["xdotool", "key", "Escape"])
+    got = hr.lines(0.3)
+    check([m["t"] for m in got] == ["esc"], "physical Escape -> one esc, XTEST Escape ignored: %r" % got)
+    # Escape aborts a running seq
+    send(h, "seq 30 m %d 0.5 0.5;d 1;s 5000;u 1" % A)
+    time.sleep(0.3)
+    t0 = time.time()
+    phys("k", ESC, 1); phys("k", ESC, 0)
+    got, done = hr.until(lambda m: m["t"] == "done")
+    check([m["t"] for m in got] == ["esc", "done"] and done == {"t": "done", "id": 30, "ok": False}
+          and time.time() - t0 < 0.5, "Escape aborts a running seq: %r" % got)
+    check(buttons_down() == 0, "no stuck button after Escape")
+    wmr.lines(0.3)
 subprocess.run(["xdotool", "mousemove", "300", "200", "click", "1"])
 subprocess.run(["xdotool", "mousedown", "1", "mousemove", "310", "210", "mouseup", "1"])
 check(not [m for m in hr.lines(0.3) if m["t"] in ("btn", "motion")], "XTEST (xdotool) input not reported")
@@ -161,12 +173,12 @@ ev = wmr.lines(0.5)
 check(done == {"t": "done", "id": 20, "ok": False} and {"ev": "refuse", "win": "B"} in ev
       and not [e for e in ev if e["ev"] in ("press", "release")],
       "refused activation: no click injected: %r" % ev)
-send(h, "seq 21 f %d;kd 38;ku 38" % B)
+send(h, "seq 21 f %d;d 1;u 1" % B)
 _, done = hr.until(lambda m: m["t"] == "done")
 ev = wmr.lines(0.5)
 check(done == {"t": "done", "id": 21, "ok": False} and {"ev": "refuse", "win": "B"} in ev
-      and not [e for e in ev if e["ev"] in ("kpress", "krelease")],
-      "refused activation: no key injected: %r" % ev)
+      and not [e for e in ev if e["ev"] in ("press", "release")],
+      "refused activation (f): no click injected: %r" % ev)
 check(buttons_down() == 0, "refused activation: no stuck button")
 xroot.delete_property(REFUSE)
 # The helper's own XRaiseWindow lifted B; put C back on top for the next test.
@@ -232,6 +244,9 @@ send(h, "bogus")
 send(h, "seq 9 m 1 2;d 1")
 got, _ = hr.until(lambda m: m["t"] == "done")
 check([m["t"] for m in got] == ["error", "error", "done"] and not got[-1]["ok"], "bad command / bad op")
+send(h, "seq 12 m %d 0.5 0.5;kd 38;ku 38" % A)  # key ops were removed in protocol v2
+got, _ = hr.until(lambda m: m["t"] == "done")
+check([m["t"] for m in got] == ["error", "done"] and not got[-1]["ok"], "kd/ku ops rejected")
 send(h, "seq 10 m %d 1e300 0;d 1" % A)
 got, _ = hr.until(lambda m: m["t"] == "done")
 check([m["t"] for m in got] == ["error", "done"] and not got[-1]["ok"], "out-of-range fraction rejected")
@@ -273,14 +288,14 @@ subprocess.run(["xdotool", "mousemove", "300", "200", "click", "1"])
 check([e["ev"] for e in wmr.lines(0.3) if e["ev"] == "press"] == ["press"], "grab released after pick")
 
 # --- EOF while holding releases everything
-send(h, "seq 10 m %d 0.5 0.5;d 1;kd 50;s 5000" % A)
+send(h, "seq 10 m %d 0.5 0.5;d 1;s 5000" % A)
 time.sleep(0.3)
 check(buttons_down() != 0, "held before EOF")
 h.stdin.close()
 rc = h.wait(timeout=2)
 ev = [e["ev"] for e in wmr.lines(0.3)]
-check(rc == 0 and buttons_down() == 0 and "release" in ev and "krelease" in ev,
-      "EOF: exit 0, button+key released (%r)" % ev)
+check(rc == 0 and buttons_down() == 0 and "release" in ev,
+      "EOF: exit 0, button released (%r)" % ev)
 
 # --- SIGTERM also releases
 h, hr = start()

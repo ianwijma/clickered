@@ -2,8 +2,10 @@ node_modules
 out
 dist
 resources/clickered-helper
+resources/clickered-helper.exe
 *.log
 build/icons
+build/icon.png
 
 # Local secrets and credentials (never commit these)
 .env

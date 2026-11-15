@@ -16,8 +16,8 @@ const api: ClickeredApi = {
   clearGroup: () => send({ c: "clearGroup" }),
   setIncluded: (id, included) => send({ c: "setIncluded", id, included }),
   setMaster: (id) => send({ c: "setMaster", id }),
-  setReplicateKeys: (on) => send({ c: "setReplicateKeys", on }),
-  setDragSpeed: (speed) => send({ c: "setDragSpeed", speed }),
+  setClickOffset: (px) => send({ c: "setClickOffset", px }),
+  setClickDelay: (ms) => send({ c: "setClickDelay", ms }),
   setSize: (width, height) => send({ c: "setSize", width, height }),
   quit: () => send({ c: "quit" }),
 }

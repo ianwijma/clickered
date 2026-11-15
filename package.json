@@ -1,7 +1,7 @@
 {
   "name": "clickered",
   "version": "0.2.0",
-  "description": "Replicate clicks, drags and keys from one window to a group of windows (X11).",
+  "description": "Replicate mouse clicks and drags from one window to a group of windows (Linux/X11, macOS, Windows).",
   "license": "MIT",
   "private": true,
   "author": {
@@ -19,23 +19,27 @@
   "keywords": [
     "x11",
     "linux",
+    "macos",
+    "windows",
     "electron",
     "multiboxing",
     "input",
+    "mouse",
+    "click",
     "automation",
     "xtest"
   ],
   "desktopName": "clickered.desktop",
   "main": "./out/main/index.js",
   "scripts": {
-    "build:helper": "make -C native",
+    "build:helper": "node scripts/build-helper.mjs",
     "dev": "npm run build:helper && electron-vite dev",
     "build": "npm run build:helper && electron-vite build",
     "start": "npm run build && electron .",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
     "test:e2e": "docker build -t clickered-e2e -f e2e/Dockerfile . && docker run --rm --init --shm-size=512m clickered-e2e",
-    "dist": "npm run build && electron-builder --linux --publish never"
+    "dist": "npm run build && node scripts/dist.mjs"
   },
   "dependencies": {
     "effect": "^4.1.4"

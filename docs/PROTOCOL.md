@@ -1,8 +1,10 @@
-# Helper protocol (version 1)
+# Helper protocol (version 2)
 
-`resources/clickered-helper` is a single-threaded C program (Xlib + XInput2 +
-XTest). It is spawned by the Electron main process. The TypeScript mirror of
-this document is `src/shared/protocol.ts` — the two must agree.
+The native helper is spawned by the Electron main process. There is one per OS, and
+all three speak this protocol (see [Platforms](#platforms) for where they differ). This
+document describes the reference X11 helper, `resources/clickered-helper` built from
+`native/helper.c`: a single-threaded C program (Xlib + XInput2 + XTest). The
+TypeScript mirror of this document is `src/shared/protocol.ts` — the two must agree.
 
 - **stdout**: one JSON object per line, flushed after every line.
 - **stdin**: one text command per line. EOF on stdin ⇒ release anything held, exit 0.
@@ -29,21 +31,21 @@ top-level child of root under the pointer; the client window is the
 
 | Message | Meaning |
 |---|---|
-| `{"t":"ready","version":1}` | Sent once at startup, followed by a `windows` message. |
+| `{"t":"ready","version":2}` | Sent once at startup, followed by a `windows` message. |
 | `{"t":"windows","active":ID,"list":[{"id","title","cls","pid","x","y","w","h","mapped"}]}` | Full client list. Sent at startup, on `list`, and (debounced ~100 ms) whenever `_NET_CLIENT_LIST` or `_NET_ACTIVE_WINDOW` changes. `x,y,w,h` = content rect. `cls` = WM_CLASS class part. `title` = `_NET_WM_NAME`, falling back to `WM_NAME`. Strings JSON-escaped, valid UTF-8. |
 | `{"t":"btn","down":BOOL,"button":N,"win":ID,"fx":F,"fy":F,"x":N,"y":N,"time":MS}` | Physical button transition. See gesture window below. |
 | `{"t":"motion","win":ID,"fx":F,"fy":F,"x":N,"y":N,"time":MS}` | Only while ≥1 physical button is held; at most one per 8 ms. |
-| `{"t":"key","down":BOOL,"keycode":N,"win":ID,"time":MS}` | Only after `keys 1`. `win` = `_NET_ACTIVE_WINDOW`. Auto-repeat presses are not reported. |
-| `{"t":"esc","time":MS}` | Panic key: a physical Escape press. Always sent (regardless of `keys`, also during a `seq`). If a `seq` is running it is aborted exactly as by `abort`. |
+| `{"t":"esc","time":MS}` | Panic key: a physical Escape press (auto-repeat ignored). Always sent, also during a `seq`. If a `seq` is running it is aborted exactly as by `abort`. No other key is ever reported. |
 | `{"t":"picked","win":ID}` | Result of `pick`. 0 = cancelled. |
 | `{"t":"done","id":N,"ok":BOOL}` | A `seq` finished (`ok:false` if aborted or every target was skipped). |
 | `{"t":"error","msg":"..."}` | Non-fatal problem (bad command, X error). |
 
 **Input source filtering.** Raw events are selected for `XIAllMasterDevices` on
 the root window (`XI_RawButtonPress/Release`, `XI_RawMotion`,
-`XI_RawKeyPress/Release`). An event whose `sourceid` is an XTEST slave device
-("Virtual core XTEST pointer"/"keyboard") is never reported. Additionally no
-`btn`/`motion`/`key` is reported while a `seq` is executing nor for 30 ms after.
+`XI_RawKeyPress`, only to detect Escape). An event whose `sourceid` is an XTEST
+slave device ("Virtual core XTEST pointer"/"keyboard") is never reported.
+Additionally no `btn`/`motion` is reported while a `seq` is executing nor for
+30 ms after.
 
 **Gesture window.** When a button goes down and no other physical button is
 held, the helper resolves the client window under the pointer and remembers it
@@ -60,7 +62,6 @@ press immediately followed by a release.
 | Command | Meaning |
 |---|---|
 | `list` | Emit a `windows` message now. |
-| `keys 0\|1` | Disable / enable `key` reporting (default 0 — keystrokes never leave the helper unless asked). |
 | `pick` | Grab the pointer with a crosshair cursor. Next left click: reply `picked` with the client window under the pointer; the click is swallowed. Right click or `pickcancel`: reply `picked` with 0. A `pick` sent right after a `picked` (before that click's button is released) keeps the grab and waits for the next click, so several windows can be picked in a row. |
 | `pickcancel` | Cancel an active pick. No-op otherwise. |
 | `seq ID OP;OP;...` | Execute ops in order, then reply `done`. |
@@ -73,7 +74,6 @@ press immediately followed by a release.
 | `f WIN` | Activate WIN (`_NET_ACTIVE_WINDOW` client message, source indication 2, plus `XRaiseWindow`) and wait until `_NET_ACTIVE_WINDOW` equals WIN, at most 200 ms. If WIN is still not active after that, enter skip mode for WIN. |
 | `m WIN FX FY` | Warp (XTest fake motion) to that fraction of WIN's content rect. If the client window under the pointer is then not WIN and no button is currently held by this seq, activate + raise WIN as in `f`, then warp again and wait (at most 100 ms) until WIN is under the pointer. If activation or that wait fails, enter skip mode for WIN. |
 | `d BTN` / `u BTN` | XTest button press / release. |
-| `kd CODE` / `ku CODE` | XTest key press / release. |
 | `s MS` | Sleep. |
 | `w X Y` | Warp to absolute root coordinates. |
 
@@ -83,10 +83,10 @@ Rules:
 
 - **Skip mode**: if `f` or `m` names a window that no longer exists (or is
   unmapped, or cannot be focused / brought under the pointer as described above), the helper first releases anything this seq holds, then ignores
-  `d`/`u`/`kd`/`ku`/`s` until the next `f`, `m` or `w` op. A `m` for the *same*
+  `d`/`u`/`s` until the next `f`, `m` or `w` op. A `m` for the *same*
   missing window stays skipped.
-- At the end of a seq (normal, aborted, or stdin EOF) every button and key the
-  seq pressed and has not released is released.
+- At the end of a seq (normal, aborted, or stdin EOF) every button the seq
+  pressed and has not released is released.
 - Sleeps must not block the process: keep reading stdin (for `abort`) and
   draining X events while sleeping. Commands other than `abort` that arrive
   during a seq are queued and run afterwards.
@@ -98,6 +98,59 @@ Rules:
 - `XFlush`/`XSync` after every injected event.
 - A custom X error handler must swallow `BadWindow`/`BadMatch`/`BadDrawable`
   (windows vanish at any time); the helper must never die from them.
+
+## Platforms
+
+| OS | Source | Binary (`resources/`, and the app's resources dir when packaged) | Details |
+|---|---|---|---|
+| Linux (X11) | `native/helper.c`, `native/Makefile` | `clickered-helper` | this document |
+| macOS 11+ | `native/mac/helper.m` | `clickered-helper` (universal arm64 + x86_64) | [native/mac/README.md](../native/mac/README.md) |
+| Windows 10/11 | `native/win/helper.c` | `clickered-helper.exe` | [native/win/README.md](../native/win/README.md) |
+
+`npm run build:helper` (`scripts/build-helper.mjs`) builds the one for the host OS. The
+wire format, commands, messages, `error` texts, skip mode and stdin-EOF behaviour are
+the same everywhere. What differs:
+
+- **Units and ids.** Window ids are 32-bit on all three (X11 window, `CGWindowID`,
+  HWND). Coordinates and content rects are pixels in root coordinates on X11, **points**
+  in global display coordinates on macOS, and **physical pixels** in virtual-screen
+  coordinates on Windows (per-monitor DPI aware). Coordinates can be negative on macOS
+  and Windows (monitors left of or above the main one). The host's click offset is in
+  these units.
+- **Content rect.** X11: the window, or its Wine child (above). macOS: the **whole
+  frame including the title bar** (there is no general way to find another app's
+  content area). Windows: the client area (title bar and borders excluded).
+- **`cls`.** X11: the `WM_CLASS` class. macOS: the owner's bundle id (then its name).
+  Windows: the Win32 class name, often shared by unrelated apps (`Chrome_WidgetWin_1`
+  for every Chromium/Electron app). The host only shows it; its own bar is recognised
+  by `pid`.
+- **`mapped:false`.** Minimized windows and windows on another workspace (X11), Space
+  (macOS) or virtual desktop (Windows). macOS also keeps windows that an app only
+  ordered out in the list as unmapped until they are destroyed; X11 drops withdrawn
+  windows.
+- **Activation.** macOS: `m` also activates a target that is under the pointer but not
+  active (macOS drops the first click into an inactive window), costing up to 200 ms
+  per target per gesture. Windows: only when covered, as on X11, using the
+  foreground-lock workarounds. Neither ever restores a minimized window or switches
+  Spaces/desktops.
+- **Startup.** The macOS helper needs the Accessibility (and maybe Input Monitoring)
+  permission. Without it, it sends `error` lines with instructions **before** `ready`
+  and waits, re-checking about once a second, for as long as it takes. The host
+  therefore has no startup timeout and shows such an `error` in the bar until `ready`.
+- **Not reachable.** Windows: windows of elevated processes (UIPI), exclusive-fullscreen
+  games, the secure desktop. macOS: Secure Input fields and apps that read raw HID.
+  Some games ignore injected input on every OS.
+- **Shutdown.** Close stdin and wait; kill only as a last resort. On Windows `kill()`
+  is `TerminateProcess`, which cannot release buttons a `seq` is holding. The host
+  closes stdin and kills after 1 s.
+- **While a `seq` runs**, the macOS helper does not poll or emit `windows`; a pending
+  change is sent right after the `seq`.
+
+## Changes
+
+- **Version 2**: keyboard replication was removed — the `keys` command, the `key`
+  message and the `kd`/`ku` seq ops no longer exist (they are rejected as unknown).
+  The `esc` panic key is unchanged.
 
 ## Implementation notes (clarifications, no wire changes)
 

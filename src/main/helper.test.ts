@@ -1,6 +1,6 @@
 import { Effect, Exit, Queue, Scope } from "effect"
 import { describe, expect, it } from "vitest"
-import type { HelperMessage } from "@shared/protocol"
+import { PROTOCOL_VERSION, type HelperMessage } from "@shared/protocol"
 import { parseHelperLine, spawnHelper, superviseHelper } from "./helper"
 import { fakeHelper } from "./__fixtures__/fake"
 
@@ -23,11 +23,13 @@ const waitFor = async (pred: () => boolean, ms = 2000): Promise<void> => {
 describe("parseHelperLine", () => {
   it("parses known messages and rejects everything else", () => {
     expect(parseHelperLine('{"t":"done","id":3,"ok":true}')).toEqual({ t: "done", id: 3, ok: true })
-    expect(parseHelperLine('  {"t":"ready","version":1}  ')).toEqual({ t: "ready", version: 1 })
+    expect(parseHelperLine('  {"t":"ready","version":2}  ')).toEqual({ t: "ready", version: 2 })
     expect(parseHelperLine("garbage")).toBeNull()
     expect(parseHelperLine("{not json")).toBeNull()
     expect(parseHelperLine('{"t":"bogus"}')).toBeNull()
     expect(parseHelperLine('{"t":"windows"}')).toBeNull()
+    // Keyboard replication was removed in protocol v2.
+    expect(parseHelperLine('{"t":"key","down":true,"keycode":38,"win":1,"time":0}')).toBeNull()
     expect(parseHelperLine("null")).toBeNull()
   })
 })
@@ -47,7 +49,7 @@ describe("spawnHelper (fake helper)", () => {
         return { ready, wins, ok }
       }).pipe(Scope.provide(scope)),
     )
-    expect(result.ready).toEqual({ t: "ready", version: 1 })
+    expect(result.ready).toEqual({ t: "ready", version: PROTOCOL_VERSION })
     expect(result.wins.t === "windows" && result.wins.list[0]?.id).toBe(5)
     expect(result.ok).toBe(true)
     expect(fake.log()).toEqual(["seq 1 m 5 0.50000 0.50000;s 10", "list"])
@@ -98,6 +100,24 @@ describe("spawnHelper (fake helper)", () => {
     )
     expect(JSON.stringify(out.exit)).toContain("HelperGone")
     expect(out.reason).toBe("helper exited with code 3")
+  })
+
+  it("lets a helper exit cleanly on stdin EOF instead of killing it", async () => {
+    const fake = fakeHelper({})
+    const scope = Scope.makeUnsafe()
+    const exited = await Effect.runPromise(
+      Effect.gen(function* () {
+        const h = yield* spawnHelper({ ...fake.opts, killAfterMs: 5000 })
+        yield* takeUntil(h.messages, "ready")
+        return h.exited
+      }).pipe(Scope.provide(scope)),
+    )
+    const started = Date.now()
+    await Effect.runPromise(Scope.close(scope, Exit.void))
+    // Closing the scope waited for the exit (well inside killAfterMs) and did not kill.
+    expect(await Effect.runPromise(exited)).toBe("helper exited with code 0")
+    expect(Date.now() - started).toBeLessThan(4000)
+    expect(fake.log()).toContain("EOF")
   })
 
   it("SIGKILLs a helper that ignores stdin EOF", async () => {

@@ -127,7 +127,7 @@ export const startFakeWm = (): Promise<FakeWm> =>
 /** Root coordinates of a fraction of A's content rect / B's window. */
 export const inA = (fx: number, fy: number): [number, number] => [Math.round(4 + fx * 632), Math.round(30 + fy * 374)]
 export const inB = (fx: number, fy: number): [number, number] => [Math.round(650 + fx * 400), Math.round(fy * 300)]
-/** A point in B that neither C nor the clickered bar (top centre) covers. */
+/** A point in B that neither C nor the Clickered bar (top centre) covers. */
 export const B_FREE: [number, number] = [1030, 280]
 
 /**

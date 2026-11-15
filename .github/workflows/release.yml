@@ -14,15 +14,18 @@ run-name: Release ${{ inputs.version_bump }} ${{ inputs.release_type }}${{ input
 # 2. `version` waits for approval on the `release` environment. Read the summary,
 #    then approve or reject under "Review deployments". Once approved, it commits
 #    the new version to the default branch and pushes the `vX.Y.Z` tag.
-# 3. `package` checks out that tag, builds the production app with electron-builder
-#    (a .deb for Linux x64), and creates the GitHub Release
-#    with those files attached. Nothing is published to npm.
+# 3. `package` checks out that tag and builds the production app with electron-builder
+#    on each OS: a .deb (Linux x64), two .dmg files (macOS arm64 and x64) and an NSIS
+#    installer (Windows x64). Builds are unsigned unless the signing secrets are set
+#    (docs/RELEASING.md).
+# 4. `release` collects those files, checksums them and creates the GitHub Release
+#    with them attached. Nothing is published to npm.
 #
-# A dry run does everything except push and release: the packaged app is still
-# uploaded as a workflow artifact, so you can download and try it.
+# A dry run does everything except push and release: the packaged apps are still
+# uploaded as a workflow artifact, so you can download and try them.
 #
-# If `package` fails, use "Re-run failed jobs": it builds the tag that was already
-# pushed and does not bump the version again.
+# If `package` or `release` fails, use "Re-run failed jobs": it builds the tag that
+# was already pushed and does not bump the version again.
 
 on:
   workflow_dispatch:
@@ -69,7 +72,9 @@ concurrency:
 env:
   # Electron 45, Vite 8 and Vitest 5 need Node.js 22.12+.
   NODE_VERSION: "22"
-  # Build tools for the native X11 helper (native/Makefile) and the icon renderer.
+  # Linux build tools for the native X11 helper (native/Makefile) and the icon renderer.
+  # macOS uses the runner's Xcode clang (native/mac), Windows its MinGW-w64 gcc and
+  # GNU make (native/win).
   APT_PACKAGES: pkg-config libx11-dev libxi-dev libxtst-dev librsvg2-bin
 
 jobs:
@@ -131,6 +136,21 @@ jobs:
       # The native helper and the electron-vite bundles; packaging happens after approval.
       - name: Build app
         run: npm run build
+
+      # Rendered once here and handed to every `package` job (macOS and Windows have
+      # no rsvg-convert preinstalled).
+      - name: Render the app icons
+        run: scripts/release/render-icons.sh
+
+      - name: Keep the icons for packaging
+        uses: actions/upload-artifact@v7
+        with:
+          name: icons
+          path: build/
+          if-no-files-found: error
+          # A re-run of a failed job may need these again a few days later.
+          retention-days: 7
+          overwrite: true
 
       - name: Work out the new version
         id: next
@@ -197,12 +217,26 @@ jobs:
         run: git push --atomic origin "HEAD:refs/heads/${BRANCH}" "refs/tags/${TAG}"
 
   package:
-    name: Build and release ${{ needs.plan.outputs.tag }}
+    name: Build ${{ needs.plan.outputs.tag }} (${{ matrix.name }})
     needs: [plan, version]
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: write # create the GitHub Release and upload its files
+    strategy:
+      # One failing OS must not cancel the others: their logs show whether it is
+      # a platform problem.
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+          - name: macOS
+            os: macos-latest
+          - name: Windows
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        # Git Bash on Windows: the scripts and native/win/Makefile need a POSIX shell.
+        shell: bash
     steps:
       - name: Check out ${{ needs.plan.outputs.tag }}
         uses: actions/checkout@v7
@@ -211,7 +245,16 @@ jobs:
           ref: ${{ inputs.dry_run && github.sha || needs.plan.outputs.tag }}
 
       - name: Install build tools
+        if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends $APT_PACKAGES
+
+      - name: Show the native toolchain
+        run: |
+          case "$RUNNER_OS" in
+            macOS) sw_vers; xcrun clang --version ;;
+            Windows) command -v gcc mingw32-make make || true; gcc --version ;;
+            *) cc --version ;;
+          esac
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -228,23 +271,80 @@ jobs:
           VERSION: ${{ needs.plan.outputs.version }}
         run: npm version "$VERSION" --no-git-tag-version
 
-      - name: Render the app icon
-        run: |
-          mkdir -p build/icons
-          rsvg-convert --width 512 --height 512 assets/icon.svg --output build/icons/512x512.png
+      - name: Get the app icons
+        uses: actions/download-artifact@v7
+        with:
+          name: icons
+          path: build/
 
       # Builds the native helper and the electron-vite bundles, then packages them
-      # with electron-builder (electron-builder.yml) into dist/.
+      # with electron-builder (electron-builder.yml, scripts/dist.mjs) into dist/.
+      # Signing and notarization only happen when the secrets are set; an empty
+      # value means "not set" (scripts/dist.mjs).
       - name: Build production app
         env:
           # fpm compresses the .deb with `tar -J` (XZ_OPT=-3). The runner's xz 5.4 is
           # single-threaded by default, which made this step take minutes; -T0 uses
           # every core. Same format, same compression level.
           XZ_DEFAULTS: -T0
+          # macOS: a "Developer ID Application" .p12 (base64) and its password, and
+          # the notarization login.
+          CSC_LINK: ${{ runner.os == 'macOS' && secrets.MAC_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ runner.os == 'macOS' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ runner.os == 'macOS' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
+          # Windows: an Authenticode .pfx (base64) and its password.
+          WIN_CSC_LINK: ${{ runner.os == 'Windows' && secrets.WIN_CSC_LINK || '' }}
+          WIN_CSC_KEY_PASSWORD: ${{ runner.os == 'Windows' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
         run: npm run dist
+
+      - name: Check the macOS signatures
+        if: runner.os == 'macOS'
+        run: |
+          for app in dist/mac*/Clickered.app; do
+            echo "== $app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+            codesign -dv "$app/Contents/Resources/clickered-helper" 2>&1 | grep -E 'Identifier|Signature|TeamIdentifier|flags'
+            lipo -info "$app/Contents/Resources/clickered-helper"
+          done
+
+      - name: Keep the packages for the release job
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.name }}
+          path: |
+            dist/*.deb
+            dist/*.dmg
+            dist/clickered-*.exe
+          if-no-files-found: error
+          # A re-run of a failed job may need these again a few days later.
+          retention-days: 7
+          overwrite: true
+
+  release:
+    name: Release ${{ needs.plan.outputs.tag }}
+    needs: [plan, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # create the GitHub Release and upload its files
+    steps:
+      - name: Check out ${{ needs.plan.outputs.tag }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.dry_run && github.sha || needs.plan.outputs.tag }}
+
+      - name: Get the packages
+        uses: actions/download-artifact@v7
+        with:
+          pattern: dist-*
+          path: dist/
+          merge-multiple: true
 
       - name: Collect release files
         env:
+          VERSION: ${{ needs.plan.outputs.version }}
           TAG: ${{ needs.plan.outputs.tag }}
         run: scripts/release/collect-files.sh
 
@@ -255,9 +355,12 @@ jobs:
           name: clickered-${{ needs.plan.outputs.version }}
           path: |
             dist/*.deb
+            dist/*.dmg
+            dist/*.exe
             dist/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
+          overwrite: true
 
       # On a re-run after a failed upload, replaces the files on the existing release.
       - name: Create GitHub Release
@@ -265,5 +368,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.plan.outputs.tag }}
+          VERSION: ${{ needs.plan.outputs.version }}
           PRERELEASE: ${{ needs.plan.outputs.prerelease }}
         run: scripts/release/publish.sh

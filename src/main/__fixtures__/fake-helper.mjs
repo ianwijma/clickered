@@ -3,6 +3,10 @@
 //
 // env: FAKE_LOG (required)      file that receives one line per stdin command (+ "EOF")
 //      FAKE_WINDOWS             JSON array of HelperWindow
+//      FAKE_VERSION             protocol version announced in `ready` (default 2)
+//      FAKE_STARTUP_ERROR       emit this `error` msg before `ready` (like the macOS helper
+//                               waiting for the Accessibility permission)
+//      FAKE_READY_DELAY         ms before `ready` + the first `windows` (default 0)
 //      FAKE_EVENTS              JSON array of helper messages, emitted after startup
 //      FAKE_EVENTS_DELAY        ms before the first event (default 80), 5 ms apart
 //      FAKE_PICK                comma-separated window ids answered to successive `pick`s (then 0)
@@ -20,8 +24,13 @@ const out = (msg) => process.stdout.write(JSON.stringify(msg) + "\n")
 const windows = JSON.parse(process.env.FAKE_WINDOWS ?? "[]")
 const sendWindows = () => out({ t: "windows", active: windows[0]?.id ?? 0, list: windows })
 
-out({ t: "ready", version: 1 })
-sendWindows()
+if (process.env.FAKE_STARTUP_ERROR) out({ t: "error", msg: process.env.FAKE_STARTUP_ERROR })
+const announce = () => {
+  out({ t: "ready", version: Number(process.env.FAKE_VERSION ?? 2) })
+  sendWindows()
+}
+if (process.env.FAKE_READY_DELAY) setTimeout(announce, Number(process.env.FAKE_READY_DELAY))
+else announce()
 process.stdout.write("this line is not json and must be ignored\n")
 process.stderr.write("fake helper up\n")
 

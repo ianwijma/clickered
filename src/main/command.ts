@@ -24,10 +24,10 @@ export const parseCommand = (u: unknown): IpcCommand | null => {
       return isWinId(o["id"]) && isBool(o["included"]) ? { c: "setIncluded", id: o["id"], included: o["included"] } : null
     case "setMaster":
       return o["id"] === null || isWinId(o["id"]) ? { c: "setMaster", id: o["id"] } : null
-    case "setReplicateKeys":
-      return isBool(o["on"]) ? { c: "setReplicateKeys", on: o["on"] } : null
-    case "setDragSpeed":
-      return isNum(o["speed"]) ? { c: "setDragSpeed", speed: o["speed"] } : null
+    case "setClickOffset":
+      return isNum(o["px"]) ? { c: "setClickOffset", px: o["px"] } : null
+    case "setClickDelay":
+      return isNum(o["ms"]) ? { c: "setClickDelay", ms: o["ms"] } : null
     case "setSize":
       return isNum(o["width"]) && isNum(o["height"]) ? { c: "setSize", width: o["width"], height: o["height"] } : null
     default:

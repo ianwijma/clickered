@@ -1,9 +1,16 @@
-# Packages the production build for Linux (X11): `npm run dist` → dist/.
-# The Release workflow (.github/workflows/release.yml) runs it and attaches the
-# files to the GitHub Release.
+# Packages the production build for the host OS: `npm run dist` → dist/
+# (scripts/dist.mjs, which also decides about signing). The Release workflow
+# (.github/workflows/release.yml) runs it on Linux, macOS and Windows and attaches
+# the files to the GitHub Release.
 appId: ma.wij.clickered
-productName: clickered
-# Same file names for every version and arch, e.g. clickered-0.2.0-amd64.deb.
+# The visible name: macOS bundle and menu name, Windows shortcuts and "Apps" entry,
+# the Linux .desktop Name. Settings stay in the lowercase "clickered" folder
+# (app.setPath("userData") in src/main/index.ts), and the Linux binary, the .deb
+# package and every file name below stay lowercase.
+productName: Clickered
+# Same file names for every version and arch, all lowercase (${name} is the
+# package.json name): clickered-0.2.0-amd64.deb, clickered-0.2.0-arm64.dmg,
+# clickered-0.2.0-x64.dmg, clickered-0.2.0-x64.exe.
 artifactName: ${name}-${version}-${arch}.${ext}
 
 directories:
@@ -18,19 +25,20 @@ files:
   # Window icon, loaded from app.getAppPath()/assets (src/main/index.ts).
   - assets/icon.png
 
-# The native X11 helper, found at process.resourcesPath (src/main/index.ts).
-extraResources:
-  - from: resources/clickered-helper
-    to: clickered-helper
-
 linux:
   category: Utility
+  # The installed binary stays /opt/<productName>/clickered, /usr/bin/clickered.
+  executableName: clickered
   # Matches package.json desktopName, so the window is linked to the .desktop entry.
   syncDesktopName: true
   synopsis: Replicate clicks and drags across a group of windows
   # build/icons/512x512.png, rendered from assets/icon.svg in CI. Without it the
   # package falls back to the default Electron icon.
   icon: build/icons
+  # The native X11 helper (native/Makefile), found at process.resourcesPath.
+  extraResources:
+    - from: resources/clickered-helper
+      to: clickered-helper
   # Only the .deb: each extra target (AppImage, tar.gz) adds packaging time to
   # every release.
   target:
@@ -52,3 +60,54 @@ deb:
     - libsecret-1-0
     - libx11-6
     - libxi6
+
+mac:
+  category: public.app-category.utilities
+  # build/icon.png (1024×1024, rendered from assets/icon.svg in CI); electron-builder
+  # turns it into the .icns. Without it the default Electron icon is used.
+  icon: build/icon.png
+  # Same minimum as the helper (native/mac/Makefile, MINOS).
+  minimumSystemVersion: "11.0"
+  # The universal helper from native/mac (one binary serves both dmgs), at
+  # Contents/Resources/clickered-helper. Signed together with the app: every Mach-O
+  # in the bundle gets the same identity (a Developer ID, or ad-hoc "-" when there is
+  # no certificate; see scripts/dist.mjs).
+  extraResources:
+    - from: resources/clickered-helper
+      to: clickered-helper
+  binaries:
+    - Contents/Resources/clickered-helper
+  # One dmg per architecture instead of a universal one: each download is half the
+  # size, and @electron/universal is not needed to merge two app builds.
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+  extendInfo:
+    # An agent app: no Dock icon and no menu bar, like the bar on Linux/Windows (which
+    # skips the taskbar). The bar has its own Quit button.
+    LSUIElement: true
+
+dmg:
+  # The dmg itself is not signed (the app inside is); a signed dmg needs a real
+  # identity and buys nothing for Gatekeeper once the app is notarized.
+  sign: false
+
+win:
+  # build/icon.png (rendered from assets/icon.svg in CI); electron-builder makes the .ico.
+  icon: build/icon.png
+  # native/win: resources/clickered-helper.exe, found at process.resourcesPath.
+  extraResources:
+    - from: resources/clickered-helper.exe
+      to: clickered-helper.exe
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  # Per-user install without a UAC prompt (electron-builder's default one-click
+  # installer). The app must not run elevated: see the UIPI note in README.md.
+  oneClick: true
+  perMachine: false

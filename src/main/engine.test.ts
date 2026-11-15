@@ -48,7 +48,13 @@ afterEach(async () => {
   engines = []
 })
 
-const setup = (opts: { config?: Partial<Config>; events?: HelperMessage[]; env?: Record<string, string>; members?: number[] }) => {
+const setup = (opts: {
+  config?: Partial<Config>
+  events?: HelperMessage[]
+  env?: Record<string, string>
+  members?: number[]
+  onReplay?: (active: boolean) => void
+}) => {
   const fake = fakeHelper({
     FAKE_WINDOWS: JSON.stringify(WINDOWS),
     FAKE_EVENTS: JSON.stringify(opts.events ?? []),
@@ -62,6 +68,7 @@ const setup = (opts: { config?: Partial<Config>; events?: HelperMessage[]; env?:
     helper: fake.opts,
     initialMembers: opts.members ?? [10, 20, 30],
     onState: (s) => states.push(s),
+    ...(opts.onReplay ? { onReplay: opts.onReplay } : {}),
   })
   engines.push(engine)
   const seqs = () => fake.log().filter((l) => l.startsWith("seq "))
@@ -95,6 +102,20 @@ describe("engine (fake helper)", () => {
     )
     await waitFor(() => engine.getState().masterId === 20 && !engine.getState().busy)
     expect(engine.getState().windows.find((w) => w.isMaster)?.id).toBe(20)
+  })
+
+  it("signals replay start and end around a seq (bar goes click-through)", async () => {
+    const calls: Array<[boolean, number]> = []
+    const { engine, seqs } = setup({
+      events: [btn(true, 1, 20, 0.5, 0.25, 1020, 383, 1000), btn(false, 1, 20, 0.5, 0.25, 1021, 383, 1060)],
+      onReplay: (active) => calls.push([active, seqs().length]),
+    })
+    await waitFor(() => calls.length === 2 && !engine.getState().busy)
+    // Started before the seq reached the helper, ended after it.
+    expect(calls).toEqual([
+      [true, 0],
+      [false, 1],
+    ])
   })
 
   it("replays a drag", async () => {

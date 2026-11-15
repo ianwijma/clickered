@@ -251,7 +251,7 @@ function start(api: ClickeredApi): void {
     el("div", "flex items-center gap-0.5", hotkeyHint, forgetBtn, quitBtn),
   )
 
-  const root = el("div", "inline-flex w-max flex-col gap-1.5 p-2.5 font-sans antialiased", bar, panel)
+  const root = el("div", "replay-fade inline-flex w-max flex-col gap-1.5 p-2.5 font-sans antialiased", bar, panel)
   app.replaceChildren(root)
 
   // ---- Window rows -------------------------------------------------------
@@ -403,6 +403,8 @@ function start(api: ClickeredApi): void {
     }
     setAttr(summary, "title", s.groupClass ? `Group: ${s.groupClass}` : null)
     setFlag(busyDot, "data-busy", s.busy)
+    // Main makes the window click-through during replays; fade it so that's visible.
+    setFlag(root, "data-replaying", s.busy)
 
     // panel content
     show(errorBox, s.helper === "error")

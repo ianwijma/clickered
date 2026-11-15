@@ -3,7 +3,7 @@
 FROM node:22-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      xvfb xauth x11-utils xdotool \
+      xvfb xauth x11-utils xdotool xinput \
       build-essential pkg-config libx11-dev libxi-dev libxtst-dev \
       python3 python3-xlib \
       libgtk-3-0 libnss3 libasound2 libgbm1 libxss1 libatk-bridge2.0-0 libdrm2 \

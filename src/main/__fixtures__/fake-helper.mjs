@@ -3,7 +3,7 @@
 //
 // env: FAKE_LOG (required)      file that receives one line per stdin command (+ "EOF")
 //      FAKE_WINDOWS             JSON array of HelperWindow
-//      FAKE_VERSION             protocol version announced in `ready` (default 2)
+//      FAKE_VERSION             protocol version announced in `ready` (default 3)
 //      FAKE_STARTUP_ERROR       emit this `error` msg before `ready` (like the macOS helper
 //                               waiting for the Accessibility permission)
 //      FAKE_READY_DELAY         ms before `ready` + the first `windows` (default 0)
@@ -28,7 +28,7 @@ const sendWindows = () => out({ t: "windows", active: windows[0]?.id ?? 0, list:
 
 if (process.env.FAKE_STARTUP_ERROR) out({ t: "error", msg: process.env.FAKE_STARTUP_ERROR })
 const announce = () => {
-  out({ t: "ready", version: Number(process.env.FAKE_VERSION ?? 2) })
+  out({ t: "ready", version: Number(process.env.FAKE_VERSION ?? 3) })
   sendWindows()
 }
 if (process.env.FAKE_READY_DELAY) setTimeout(announce, Number(process.env.FAKE_READY_DELAY))
@@ -51,6 +51,10 @@ createInterface({ input: process.stdin })
     else if (cmd === "pick") {
       if (picks.length === 0 && process.env.FAKE_PICK_WAIT === "1") return
       setTimeout(() => out({ t: "picked", win: Number(picks.shift() ?? 0) }), 10)
+    }
+    else if (cmd === "bg") {
+      // Accepts `bg 0` / `bg 1` silently, like the real helper; anything else is an error.
+      if (arg !== "0" && arg !== "1") out({ t: "error", msg: "bad bg argument (expected 0 or 1)" })
     }
     else if (cmd === "pickcancel") out({ t: "picked", win: 0 })
     else if (cmd === "seq") {

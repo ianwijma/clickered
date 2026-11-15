@@ -29,7 +29,7 @@ def check(cond, what):
     global fails
     print(('PASS ' if cond else 'FAIL ') + what)
     if not cond: fails += 1
-m = get(60); check(m == {"t": "ready", "version": 2}, 'ready version 2')
+m = get(60); check(m == {"t": "ready", "version": 3}, 'ready version 3')
 m = get(); check(m['t'] == 'windows' and isinstance(m['list'], list), 'windows after ready')
 send('list'); m = get(); check(m['t'] == 'windows', 'list -> windows')
 send('keys 1'); m = get(); check(m['t'] == 'error' and 'unknown command' in m['msg'], 'keys is an unknown command')

@@ -18,6 +18,7 @@ const api: ClickeredApi = {
   setMaster: (id) => send({ c: "setMaster", id }),
   setClickOffset: (px) => send({ c: "setClickOffset", px }),
   setClickDelay: (ms) => send({ c: "setClickDelay", ms }),
+  setBackgroundClicks: (on) => send({ c: "setBackgroundClicks", on }),
   setSize: (width, height) => send({ c: "setSize", width, height }),
   quit: () => send({ c: "quit" }),
 }

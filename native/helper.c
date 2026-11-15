@@ -1,7 +1,7 @@
 /*
  * clickered-helper — X11 input capture / replay helper for clickered.
  *
- * Spec: docs/PROTOCOL.md (protocol version 2).
+ * Spec: docs/PROTOCOL.md (protocol version 3).
  *   stdout: one JSON object per line (flushed)
  *   stdin : one command per line
  *   stderr: diagnostics
@@ -17,6 +17,7 @@
 #include <X11/Xatom.h>
 #include <X11/Xproto.h>
 #include <X11/cursorfont.h>
+#include <X11/extensions/XInput.h>
 #include <X11/extensions/XInput2.h>
 #include <X11/extensions/XTest.h>
 
@@ -33,7 +34,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#define PROTOCOL_VERSION 2
+#define PROTOCOL_VERSION 3
+#define BG_MASTER_NAME "clickered-bg"
 #define MOTION_INTERVAL_MS 8
 #define POST_SEQ_SUPPRESS_MS 30
 #define WINDOWS_DEBOUNCE_MS 100
@@ -254,8 +256,14 @@ static void emit_error(const char *fmt, ...)
 /* ------------------------------------------------------------------------ */
 /* X error handling                                                          */
 
+static int xerr_quiet, xerr_seen;
+
 static int on_xerror(Display *d, XErrorEvent *e)
 {
+    if (xerr_quiet) {
+        xerr_seen = 1;
+        return 0;
+    }
     if (e->error_code == BadWindow || e->error_code == BadMatch ||
         e->error_code == BadDrawable)
         return 0; /* windows vanish at any time */
@@ -337,6 +345,8 @@ static Window toplevel_of(Window w)
     return 0;
 }
 
+static Window client_of_child(Window child);
+
 /* Client window under the pointer (0 if none). Root coords in *px,*py. */
 static Window client_under_pointer(int *px, int *py)
 {
@@ -349,6 +359,12 @@ static Window client_under_pointer(int *px, int *py)
     }
     if (px) *px = rx;
     if (py) *py = ry;
+    return client_of_child(child);
+}
+
+/* Client window that is, or lives inside, the root child `child`. */
+static Window client_of_child(Window child)
+{
     if (!child) return 0;
     Window *list;
     unsigned long n = get_client_list(&list);
@@ -563,6 +579,171 @@ static void unlock_pointers(void)
     for (int i = 0; i < n_locked; i++) XIUngrabDevice(dpy, locked_ids[i], CurrentTime);
     n_locked = 0;
     XFlush(dpy);
+}
+
+
+/* ------------------------------------------------------------------------ */
+/* Background mode: a second master pointer (XInput2 multi-pointer)          */
+
+/* Created by `bg 1`, removed by `bg 0`, at exit, and (stale ones) at startup. Clicks
+ * are injected on the new master's own XTEST pointer, so the user's pointer is never
+ * touched. */
+static int bg_active;            /* master exists and is usable */
+static int bg_mptr = -1;         /* our master pointer */
+static XDevice *bg_dev;          /* its XTEST slave pointer, opened for XI1 injection */
+static int bg_moved;             /* the virtual pointer was moved since the last park */
+static Window bg_target;         /* target of the last successful `m` in this seq */
+static Window bg_cp_win;         /* window whose client pointer is currently ours */
+static int bg_cp_prev = -1;      /* the client pointer to restore */
+
+static int has_bg_prefix(const char *name)
+{
+    return name && strncmp(name, BG_MASTER_NAME, strlen(BG_MASTER_NAME)) == 0;
+}
+
+/* The user's primary master pointer/keyboard: the first master pointer that is not ours. */
+static int find_primary(int *ptr, int *kbd)
+{
+    int nd = 0, found = 0;
+    XIDeviceInfo *info = XIQueryDevice(dpy, XIAllMasterDevices, &nd);
+    for (int i = 0; i < nd && !found; i++) {
+        if (info[i].use != XIMasterPointer || has_bg_prefix(info[i].name)) continue;
+        *ptr = info[i].deviceid;
+        *kbd = info[i].attachment;
+        found = 1;
+    }
+    if (info) XIFreeDeviceInfo(info);
+    return found;
+}
+
+static void remove_master(int mptr, int ret_ptr, int ret_kbd)
+{
+    XIRemoveMasterInfo rm;
+    memset(&rm, 0, sizeof rm);
+    rm.type = XIRemoveMaster;
+    rm.deviceid = mptr;
+    rm.return_mode = XIAttachToMaster;
+    rm.return_pointer = ret_ptr;
+    rm.return_keyboard = ret_kbd;
+    xerr_quiet++;
+    XIChangeHierarchy(dpy, (XIAnyHierarchyChangeInfo *)&rm, 1);
+    XSync(dpy, False);
+    xerr_quiet--;
+}
+
+/* Remove every master whose name starts with the fixed prefix. Removing a master whose
+ * button is still held delivers the pending release. Returns how many were removed. */
+static int bg_sweep(void)
+{
+    int pp, pk, removed = 0;
+    if (!find_primary(&pp, &pk)) return 0;
+    int nd = 0;
+    XIDeviceInfo *info = XIQueryDevice(dpy, XIAllMasterDevices, &nd);
+    for (int i = 0; i < nd; i++) {
+        if (info[i].use != XIMasterPointer || !has_bg_prefix(info[i].name)) continue;
+        remove_master(info[i].deviceid, pp, pk);
+        removed++;
+    }
+    if (info) XIFreeDeviceInfo(info);
+    return removed;
+}
+
+static int device_by_name(const char *name)
+{
+    int nd = 0, id = -1;
+    XIDeviceInfo *info = XIQueryDevice(dpy, XIAllDevices, &nd);
+    for (int i = 0; i < nd; i++)
+        if (info[i].name && strcmp(info[i].name, name) == 0) id = info[i].deviceid;
+    if (info) XIFreeDeviceInfo(info);
+    return id;
+}
+
+static void bg_hide_cursor(void)
+{
+    Pixmap pm = XCreatePixmap(dpy, root, 1, 1, 1);
+    XColor c;
+    memset(&c, 0, sizeof c);
+    Cursor blank = XCreatePixmapCursor(dpy, pm, pm, &c, &c, 0, 0);
+    XIDefineCursor(dpy, bg_mptr, root, blank);
+    XFreeCursor(dpy, blank);
+    XFreePixmap(dpy, pm);
+}
+
+static void bg_disable(void)
+{
+    if (bg_mptr < 0) return;
+    if (bg_dev) {
+        XCloseDevice(dpy, bg_dev);
+        bg_dev = NULL;
+    }
+    int pp, pk;
+    if (find_primary(&pp, &pk)) remove_master(bg_mptr, pp, pk);
+    bg_sweep();
+    bg_mptr = -1;
+    bg_active = 0;
+    bg_moved = 0;
+    bg_target = 0;
+    bg_cp_win = 0;
+    refresh_xtest_devices();
+}
+
+static void bg_enable(void)
+{
+    if (bg_active) return;
+    bg_sweep();
+    XIAddMasterInfo add;
+    memset(&add, 0, sizeof add);
+    add.type = XIAddMaster;
+    add.name = (char *)BG_MASTER_NAME;
+    add.send_core = True;
+    add.enable = True;
+    xerr_seen = 0;
+    xerr_quiet++;
+    Status st = XIChangeHierarchy(dpy, (XIAnyHierarchyChangeInfo *)&add, 1);
+    XSync(dpy, False);
+    xerr_quiet--;
+    char nm[64];
+    snprintf(nm, sizeof nm, "%s pointer", BG_MASTER_NAME);
+    int mptr = device_by_name(nm);
+    snprintf(nm, sizeof nm, "%s XTEST pointer", BG_MASTER_NAME);
+    int xptr = device_by_name(nm);
+    /* The new XTEST slaves must be known to the capture filter before any click. */
+    refresh_xtest_devices();
+    if (st != Success || xerr_seen || mptr < 0 || xptr < 0) {
+        if (mptr >= 0) {
+            int pp, pk;
+            if (find_primary(&pp, &pk)) remove_master(mptr, pp, pk);
+            refresh_xtest_devices();
+        }
+        emit_error("background mode unavailable: cannot create a second pointer; staying in foreground mode");
+        return;
+    }
+    bg_dev = XOpenDevice(dpy, (XID)xptr);
+    if (!bg_dev) {
+        int pp, pk;
+        if (find_primary(&pp, &pk)) remove_master(mptr, pp, pk);
+        refresh_xtest_devices();
+        emit_error("background mode unavailable: cannot open the virtual pointer device; staying in foreground mode");
+        return;
+    }
+    bg_mptr = mptr;
+    bg_active = 1;
+    bg_hide_cursor();
+    XSync(dpy, False);
+}
+
+/* Client window under the virtual pointer (0 if none). */
+static Window bg_client_under_pointer(int dev)
+{
+    Window r = 0, child = 0;
+    double rx, ry, wx, wy;
+    XIButtonState b;
+    XIModifierState m;
+    XIGroupState g;
+    memset(&b, 0, sizeof b);
+    if (!XIQueryPointer(dpy, dev, root, &r, &child, &rx, &ry, &wx, &wy, &b, &m, &g)) return 0;
+    free(b.mask);
+    return client_of_child(child);
 }
 
 static int is_xtest(int id)
@@ -993,17 +1174,64 @@ static int any_btn_held(void)
     return 0;
 }
 
+static int seq_bg; /* the running seq is a background seq */
+
+/* Background clicks on GTK targets steal the user's keyboard focus unless the target's
+ * client pointer is the virtual pointer while the click happens. */
+static void bg_cp_set(Window w)
+{
+    if (bg_cp_win || !w) return;
+    int prev = -1;
+    if (!XIGetClientPointer(dpy, w, &prev)) prev = -1;
+    bg_cp_prev = prev;
+    bg_cp_win = w;
+    XISetClientPointer(dpy, w, bg_mptr);
+    inject_flush();
+}
+
+static void bg_cp_restore(void)
+{
+    if (!bg_cp_win) return;
+    if (bg_cp_prev >= 0) XISetClientPointer(dpy, bg_cp_win, bg_cp_prev);
+    bg_cp_win = 0;
+    bg_cp_prev = -1;
+    inject_flush();
+}
+
+static void bg_move(int x, int y)
+{
+    int ax[2] = {x, y};
+    XTestFakeDeviceMotionEvent(dpy, bg_dev, False, 0, ax, 2, CurrentTime);
+    bg_moved = 1;
+    inject_flush();
+}
+
+/* Put the virtual pointer out of the way (windows with their own cursor still show it). */
+static void bg_park(void)
+{
+    if (!bg_moved || !bg_dev) return;
+    bg_move(DisplayWidth(dpy, scr) - 1, DisplayHeight(dpy, scr) - 1);
+    bg_moved = 0;
+}
+
+static void fake_button(unsigned b, int down)
+{
+    if (seq_bg) XTestFakeDeviceButtonEvent(dpy, bg_dev, b, down, NULL, 0, CurrentTime);
+    else XTestFakeButtonEvent(dpy, b, down, CurrentTime);
+}
+
 static void release_all(void)
 {
     int any = 0;
     for (int i = 0; i < 256; i++) {
         if (held_btn[i]) {
-            XTestFakeButtonEvent(dpy, (unsigned)i, False, CurrentTime);
+            fake_button((unsigned)i, False);
             held_btn[i] = 0;
             any = 1;
         }
     }
     if (any) inject_flush();
+    if (seq_bg) bg_cp_restore();
 }
 
 /*
@@ -1186,7 +1414,9 @@ static void run_seq(char *args)
     seq_running = 1;
     abort_flag = 0;
     scan_queued_abort();
-    lock_pointers();
+    seq_bg = bg_active;
+    bg_target = 0;
+    if (!seq_bg) lock_pointers();
     int skip = 0;
     Window skipwin = 0;
     int any_target = 0, any_ok = 0;
@@ -1208,6 +1438,10 @@ static void run_seq(char *args)
                 break;
             }
             skip = 0;
+            if (seq_bg && o->op == 'f') {
+                any_ok = 1; /* background: existence check only, never activate */
+                break;
+            }
             if (o->op == 'f') {
                 /* Never type into a window that did not actually get focus. */
                 if (!activate(w)) {
@@ -1224,6 +1458,29 @@ static void run_seq(char *args)
                 release_all();
                 skip = 1;
                 skipwin = w;
+                break;
+            }
+            if (seq_bg) {
+                /* With a button held (a drag) the checks do not apply: the implicit grab
+                 * decides where events go. */
+                if (!any_btn_held()) {
+                    int pp, pk;
+                    if (find_primary(&pp, &pk) && bg_client_under_pointer(pp) == w) {
+                        bg_target = 0;
+                        skip = 1; /* the user's own pointer is inside the target */
+                        skipwin = w;
+                        break;
+                    }
+                }
+                bg_move(frac_to_px(o->fx, r.x, r.w), frac_to_px(o->fy, r.y, r.h));
+                if (!any_btn_held() && bg_client_under_pointer(bg_mptr) != w) {
+                    bg_target = 0;
+                    skip = 1; /* covered: never click into whatever is on top */
+                    skipwin = w;
+                    break;
+                }
+                bg_target = w;
+                any_ok = 1;
                 break;
             }
             warp(frac_to_px(o->fx, r.x, r.w), frac_to_px(o->fy, r.y, r.h));
@@ -1247,9 +1504,11 @@ static void run_seq(char *args)
         case 'd':
         case 'u':
             if (skip) break;
-            XTestFakeButtonEvent(dpy, (unsigned)o->a, o->op == 'd', CurrentTime);
+            if (seq_bg && o->op == 'd' && !any_btn_held()) bg_cp_set(bg_target);
+            fake_button((unsigned)o->a, o->op == 'd');
             held_btn[o->a] = o->op == 'd';
             inject_flush();
+            if (seq_bg && !any_btn_held()) bg_cp_restore();
             break;
         case 's':
             if (skip) break;
@@ -1257,14 +1516,20 @@ static void run_seq(char *args)
             break;
         case 'w':
             skip = 0;
-            warp((int)o->a, (int)o->b);
+            if (!seq_bg) warp((int)o->a, (int)o->b);
             break;
         }
         if (seq_interrupted()) break;
     }
     int interrupted = seq_interrupted();
     release_all();
-    unlock_pointers();
+    if (seq_bg) {
+        bg_cp_restore();
+        bg_park();
+    } else {
+        unlock_pointers();
+    }
+    seq_bg = 0;
     free(ops);
     seq_running = 0;
     suppress_until = now_ms() + POST_SEQ_SUPPRESS_MS;
@@ -1287,6 +1552,11 @@ static void exec_line(char *line)
         pick_cancel();
     } else if (strncmp(t, "seq", 3) == 0 && (t[3] == ' ' || t[3] == '\t')) {
         run_seq(trim(t + 4));
+    } else if (strncmp(t, "bg", 2) == 0 && (t[2] == ' ' || t[2] == '\t' || t[2] == 0)) {
+        const char *a = trim(t + 2);
+        if (strcmp(a, "1") == 0) bg_enable();
+        else if (strcmp(a, "0") == 0) bg_disable();
+        else emit_error("bad bg argument (expected 0 or 1)");
     } else if (strcmp(t, "abort") == 0) {
         /* no seq running: nothing to do */
     } else {
@@ -1315,6 +1585,7 @@ static void shutdown_and_exit(int code)
 {
     release_all();
     if (pick_state) pick_end();
+    bg_disable();
     XSync(dpy, False);
     XCloseDisplay(dpy);
     exit(code);
@@ -1372,6 +1643,7 @@ int main(void)
     A_UTF8 = XInternAtom(dpy, "UTF8_STRING", False);
     A_PID = XInternAtom(dpy, "_NET_WM_PID", False);
 
+    bg_sweep(); /* masters left behind by a crashed helper */
     refresh_xtest_devices();
 
     unsigned char m1[XIMaskLen(XI_LASTEVENT)] = {0};

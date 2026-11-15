@@ -2,7 +2,7 @@
  * The whole app: built Electron bundle + real helper + fake WM on Xvfb, driven through
  * the bar UI with Playwright.
  */
-import { existsSync, mkdtempSync } from "node:fs"
+import { existsSync, mkdtempSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { _electron, type ElectronApplication, type Page } from "playwright-core"
@@ -116,6 +116,13 @@ describe("app e2e (Electron, real helper, Xvfb)", () => {
         return o?.nextElementSibling === d
       })()`),
     ).toBe(true)
+    // Background clicks (experimental) sits right below Click delay.
+    expect(
+      await page.evaluate(`(() => {
+        const d = document.querySelector('[role="radiogroup"][aria-label="Click delay"]')?.parentElement
+        return d?.nextElementSibling?.textContent?.includes("Background clicks") === true
+      })()`),
+    ).toBe(true)
     expect(await page.getByText("Replicate typing").count()).toBe(0)
     expect(await page.getByText("Drag speed").count()).toBe(0)
     // Quit from the panel: the app exits.
@@ -130,5 +137,29 @@ describe("app e2e (Electron, real helper, Xvfb)", () => {
       })
     await closed
     app = null
+  })
+
+  it("has an experimental Background clicks switch that toggles and persists", async () => {
+    await page.getByRole("button", { name: "Windows & settings" }).waitFor({ state: "visible", timeout: 15_000 })
+    await page.getByRole("button", { name: "Windows & settings" }).click()
+    const sw = page.getByRole("switch", { name: /Click target windows without moving your mouse/ })
+    await sw.waitFor({ state: "visible" })
+    expect(await page.getByText("Experimental", { exact: true }).count()).toBe(1)
+    expect(await sw.getAttribute("aria-checked")).toBe("false")
+    await sw.click()
+    await page.locator('[role="switch"][aria-checked="true"][aria-label^="Click target windows"]').waitFor()
+    // The config is saved a moment after the change.
+    const userData = await app!.evaluate(({ app: a }) => a.getPath("userData"))
+    const saved = (): unknown => {
+      try {
+        return (JSON.parse(readFileSync(join(userData, "config.json"), "utf8")) as { backgroundClicks?: unknown }).backgroundClicks
+      } catch {
+        return undefined
+      }
+    }
+    await waitFor(() => saved() === true, "backgroundClicks saved as true", 5000)
+    await sw.click()
+    await page.locator('[role="switch"][aria-checked="false"][aria-label^="Click target windows"]').waitFor()
+    await waitFor(() => saved() === false, "backgroundClicks saved as false", 5000)
   })
 })

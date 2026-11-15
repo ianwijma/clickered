@@ -21,6 +21,8 @@ export interface Config {
   readonly clickOffset: number
   /** Maximum random pause in ms before each target window (one of `CLICK_DELAYS`). */
   readonly clickDelay: number
+  /** Experimental: click without moving the user's pointer. Only `true` enables it. */
+  readonly backgroundClicks: boolean
   readonly hotkey: string
   readonly bar: BarPosition | null
   /** Overrides for individual timing constants (unknown/invalid keys are ignored). */
@@ -34,6 +36,7 @@ export const DEFAULT_CONFIG: Config = {
   groupLabel: null,
   clickOffset: 0,
   clickDelay: 0,
+  backgroundClicks: false,
   hotkey: DEFAULT_HOTKEY,
   bar: null,
   timing: {},
@@ -69,6 +72,7 @@ export const sanitizeConfig = (raw: unknown): Config => {
     groupLabel: groupClass ? str(raw["groupLabel"]) : null,
     clickOffset: snapClickOffset(raw["clickOffset"]),
     clickDelay: snapClickDelay(raw["clickDelay"]),
+    backgroundClicks: raw["backgroundClicks"] === true,
     hotkey: str(raw["hotkey"]) ?? DEFAULT_HOTKEY,
     bar: bx !== null && by !== null ? { x: Math.round(bx), y: Math.round(by) } : null,
     timing,

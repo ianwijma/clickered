@@ -29,6 +29,11 @@ describe("encodeCommand", () => {
     expect(encodeCommand({ c: "abort" })).toBe("abort")
   })
 
+  it("serialises the background mode switch", () => {
+    expect(encodeCommand({ c: "bg", on: true })).toBe("bg 1")
+    expect(encodeCommand({ c: "bg", on: false })).toBe("bg 0")
+  })
+
   it("joins seq ops with ';' on a single line", () => {
     const line = encodeCommand({
       c: "seq",

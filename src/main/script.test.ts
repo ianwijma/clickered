@@ -290,6 +290,51 @@ describe("timeout estimate", () => {
   })
 })
 
+describe("background clicks", () => {
+  const click: Gesture = { kind: "press", source: 1, button: 1, points: [pt(500, 250, 0, 0.5, 0.25), pt(501, 250, 80, 0.501, 0.25)] }
+  const drag: Gesture = {
+    kind: "press",
+    source: 1,
+    button: 1,
+    points: [pt(100, 100, 0, 0.1, 0.2), pt(200, 100, 20, 0.2, 0.2), pt(300, 150, 40, 0.3, 0.3), pt(300, 150, 60, 0.3, 0.3)],
+  }
+  const wheel: Gesture = { kind: "wheel", source: 1, button: 4, at: pt(500, 250, 0, 0.5, 0.5), count: 2 }
+
+  it("is off by default: output keeps the pointer restore and re-focus", () => {
+    for (const g of [click, drag, wheel]) {
+      expect(buildScript(g, [2], { ...opts, backgroundClicks: false })).toEqual(buildScript(g, [2], opts))
+      const ops = buildScript(g, [2], opts)
+      expect(ops.at(-2)?.op).toBe("w")
+      expect(ops.at(-1)).toEqual({ op: "f", win: 1 })
+    }
+  })
+
+  it("drops every w and f when on, leaving the rest unchanged", () => {
+    for (const g of [click, drag, wheel]) {
+      const fg = buildScript(g, [2, 3], opts)
+      const bg = buildScript(g, [2, 3], { ...opts, backgroundClicks: true })
+      expect(bg.some((o) => o.op === "w" || o.op === "f")).toBe(false)
+      expect(bg).toEqual(fg.filter((o) => o.op !== "w" && o.op !== "f"))
+    }
+    expect(enc(buildScript(click, [2, 3], { ...opts, backgroundClicks: true }))).toBe(
+      "m 2 0.50000 0.25000;s 25;d 1;s 35;u 1;s 20;m 3 0.50000 0.25000;s 25;d 1;s 35;u 1;s 20",
+    )
+  })
+
+  it("keeps click offset and click delay", () => {
+    const sizeOf = () => ({ w: 1000, h: 500 })
+    const o = { ...opts, clickOffset: 20, clickDelay: 200, sizeOf, rng: () => 0.5 }
+    const fg = buildScript(click, [2, 3], o)
+    const bg = buildScript(click, [2, 3], { ...o, backgroundClicks: true })
+    expect(bg).toEqual(fg.filter((x) => x.op !== "w" && x.op !== "f"))
+    expect(bg.some((x) => x.op === "s" && x.ms === 100)).toBe(true)
+  })
+
+  it("still returns nothing when there is nothing to do", () => {
+    expect(buildScript(click, [1], { ...opts, backgroundClicks: true })).toEqual([])
+  })
+})
+
 describe("click delay", () => {
   const size = { w: 1000, h: 500 }
   const sizeOf = (): { w: number; h: number } => size

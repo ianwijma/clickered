@@ -39,6 +39,7 @@ export interface Model {
   readonly masterId: WindowId | null
   readonly clickOffset: number
   readonly clickDelay: number
+  readonly backgroundClicks: boolean
   readonly hotkey: string
   readonly busy: boolean
 }
@@ -100,6 +101,7 @@ export const toAppState = (m: Model): AppState => ({
   masterId: m.masterId,
   clickOffset: m.clickOffset,
   clickDelay: m.clickDelay,
+  backgroundClicks: m.backgroundClicks,
   hotkey: m.hotkey,
   busy: m.busy,
 })
@@ -173,6 +175,7 @@ export const startEngine = (opts: EngineOptions): Engine => {
       masterId: null,
       clickOffset: cfg.clickOffset,
       clickDelay: cfg.clickDelay,
+      backgroundClicks: cfg.backgroundClicks,
       hotkey: cfg.hotkey,
       busy: false,
     })
@@ -228,6 +231,7 @@ export const startEngine = (opts: EngineOptions): Engine => {
           timing,
           clickOffset: m.clickOffset,
           clickDelay: m.clickDelay,
+          backgroundClicks: m.backgroundClicks,
           sizeOf: (id) => sizes.get(id),
           ...(opts.rng ? { rng: opts.rng } : {}),
         })
@@ -367,6 +371,8 @@ export const startEngine = (opts: EngineOptions): Engine => {
             if (msg.version !== PROTOCOL_VERSION)
               yield* log(`warning: helper speaks protocol v${msg.version}, expected v${PROTOCOL_VERSION}; rebuild it`)
             yield* update((s) => ({ ...s, helper: "ready", helperError: null }))
+            // The helper starts in foreground mode (also after a restart): tell it the current setting.
+            yield* send({ c: "bg", on: get().backgroundClicks })
           })
         case "windows":
           return Effect.gen(function* () {
@@ -516,6 +522,12 @@ export const startEngine = (opts: EngineOptions): Engine => {
             const ms = snapClickDelay(cmd.ms)
             yield* update((s) => ({ ...s, clickDelay: ms }))
             opts.config.update({ clickDelay: ms })
+          })
+        case "setBackgroundClicks":
+          return Effect.gen(function* () {
+            yield* update((s) => ({ ...s, backgroundClicks: cmd.on }))
+            opts.config.update({ backgroundClicks: cmd.on })
+            if (get().helper === "ready") yield* send({ c: "bg", on: cmd.on })
           })
         case "setSize":
         case "quit":

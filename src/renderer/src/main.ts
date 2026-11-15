@@ -240,6 +240,23 @@ function start(api: ClickeredApi): void {
     (ms) => api.setClickDelay(ms),
   )
 
+  const BG_HINT = "Click target windows without moving your mouse. Experimental: some apps ignore these clicks."
+  const bgSwitch = smallSwitch(BG_HINT)
+  bgSwitch.title = BG_HINT
+  bgSwitch.addEventListener("click", () => {
+    if (state) api.setBackgroundClicks(!state.backgroundClicks)
+  })
+  const bgName = el("span", "flex min-w-0 flex-1 items-center gap-1.5", "Background clicks")
+  bgName.title = BG_HINT
+  bgName.append(
+    el(
+      "span",
+      "shrink-0 rounded px-1 text-[10px] font-semibold tracking-wide text-amber-700 uppercase dark:text-amber-400",
+      "Experimental",
+    ),
+  )
+  const background = el("div", "flex h-9 items-center gap-2 px-2", bgName, bgSwitch)
+
   const TEXT_BTN =
     "h-7 rounded-md px-2 text-xs font-medium text-zinc-600 hover:bg-zinc-900/[.07] hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/10 dark:hover:text-zinc-100"
   const hotkeyHint = el("span", `flex-1 truncate px-2 text-xs ${MUTED}`)
@@ -263,6 +280,7 @@ function start(api: ClickeredApi): void {
     listDivider,
     offset.row,
     delay.row,
+    background,
     divider(),
     el("div", "flex items-center gap-0.5", hotkeyHint, forgetBtn, quitBtn),
   )
@@ -466,6 +484,8 @@ function start(api: ClickeredApi): void {
 
     for (const { v, b } of offset.btns) setAttr(b, "aria-checked", v === s.clickOffset ? "true" : "false")
     for (const { v, b } of delay.btns) setAttr(b, "aria-checked", v === s.clickDelay ? "true" : "false")
+
+    setAttr(bgSwitch, "aria-checked", s.backgroundClicks ? "true" : "false")
 
     setText(hotkeyHint, hk ? `${hk} toggles` : "")
     show(forgetBtn, hasGroup)

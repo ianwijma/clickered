@@ -15,6 +15,7 @@ const state = (windows: GroupWindow[], label: string | null = null, cls: string 
   masterId: null,
   clickOffset: 0,
   clickDelay: 0,
+  backgroundClicks: false,
   hotkey: "Control+`",
   busy: false,
 })

@@ -200,10 +200,11 @@ describe("engine (fake helper)", () => {
     await waitFor(() => engine.getState().windows.length === 1)
     engine.command({ c: "cancelPick" })
     await waitFor(() => !engine.getState().picking)
-    await sleep(60)
+    // The fake helper is a separate process: wait for it to log the command rather than
+    // assuming it has after a fixed delay (flaky on slow CI runners).
+    await waitFor(() => fake.log().includes("pickcancel"))
     expect(engine.getState().picking).toBe(false)
     expect(engine.getState().windows.map((w) => w.id)).toEqual([10])
-    expect(fake.log()).toContain("pickcancel")
   })
 
   it("buffers keys and replays them after a pause", async () => {

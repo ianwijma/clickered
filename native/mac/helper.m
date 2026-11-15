@@ -1,8 +1,9 @@
 /*
  * clickered-helper (macOS) — input capture / replay helper for clickered.
  *
- * Spec: docs/PROTOCOL.md (protocol version 2; no keyboard replication). This is a port
- * of native/helper.c (X11) speaking exactly the same line protocol:
+ * Spec: docs/PROTOCOL.md (protocol version 3; no keyboard replication; experimental
+ * background mode via `bg 1`). This is a port of native/helper.c (X11) speaking exactly
+ * the same line protocol:
  *   stdout: one JSON object per line (flushed)
  *   stdin : one command per line
  *   stderr: diagnostics
@@ -42,7 +43,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define PROTOCOL_VERSION 2
+#define PROTOCOL_VERSION 3
 #define MOTION_INTERVAL_MS 8
 #define POST_SEQ_SUPPRESS_MS 30
 #define WINDOWS_DEBOUNCE_MS 100
@@ -80,6 +81,8 @@ static CFRunLoopSourceRef wake_src; /* signalled by the tap thread; drains outpu
 
 static atomic_int exit_requested;
 static atomic_int seq_running;
+/* Mouse lock: set only while a foreground seq runs (background seqs never lock). */
+static atomic_int mouse_locked;
 static atomic_int abort_flag;
 static _Atomic long long suppress_until;
 static int stdin_eof; /* main thread only */
@@ -1112,6 +1115,8 @@ static void tap_timer_cb(CFRunLoopTimerRef timer, void *info)
     tap_arm_timer();
 }
 
+/* Events we post to the HID tap (foreground). Background events are posted with
+ * CGEventPostToPid and never pass this session-level tap; they are tagged anyway. */
 static int is_own_event(CGEventRef ev)
 {
     return CGEventGetIntegerValueField(ev, kCGEventSourceUserData) == INJECT_TAG ||
@@ -1155,7 +1160,7 @@ static CGEventRef on_mouse_button(CGEventRef ev, CGEventType type)
         swallowed_mask |= bit;
         return NULL;
     }
-    if (seq_running) {
+    if (mouse_locked) {
         /* mouse lock: physical presses must not disturb the replay */
         swallowed_mask |= bit;
         return NULL;
@@ -1166,7 +1171,7 @@ static CGEventRef on_mouse_button(CGEventRef ev, CGEventType type)
 
 static CGEventRef on_drag(CGEventRef ev)
 {
-    if (seq_running || swallowed_mask) return NULL;
+    if (mouse_locked || swallowed_mask) return NULL;
     CGPoint p = CGEventGetLocation(ev);
     if (held_mask && !input_suppressed() && !pick_state) {
         last_motion_pt = p;
@@ -1182,7 +1187,7 @@ static CGEventRef on_drag(CGEventRef ev)
 
 static CGEventRef on_scroll(CGEventRef ev)
 {
-    if (seq_running || pick_state) return NULL; /* lock / swallowed by pick */
+    if (mouse_locked || pick_state) return NULL; /* lock / swallowed by pick */
     /* Momentum (inertia) events are synthesized after the fingers lift; X11 never
      * reports those as wheel buttons, so neither do we. */
     if (CGEventGetIntegerValueField(ev, kCGScrollWheelEventMomentumPhase) != 0) return ev;
@@ -1243,7 +1248,7 @@ static CGEventRef tap_cb(CGEventTapProxy proxy, CGEventType type, CGEventRef ev,
     case kCGEventOtherMouseDragged:
         return on_drag(ev);
     case kCGEventMouseMoved:
-        if (seq_running) return NULL;
+        if (mouse_locked) return NULL;
         if (pick_state) pick_hover(CGEventGetLocation(ev), 0);
         return ev;
     case kCGEventScrollWheel:
@@ -1582,8 +1587,199 @@ static void scroll_tick(int xb)
     post(e);
 }
 
+/* Click state of a press (macOS apps detect double clicks from it, not from timing) or of
+ * the release of CG button cg at p. Shared by foreground and background injection. */
+static int click_state(int cg, int down, CGPoint p)
+{
+    if (!down) return held_click_state[cg] > 0 ? held_click_state[cg] : 1;
+    long long t_ms = now_ms();
+    int cs;
+    if (cg == last_down_cg && t_ms - last_down_ms <= dbl_click_ms &&
+        fabs(p.x - last_down_pt.x) <= 4 && fabs(p.y - last_down_pt.y) <= 4)
+        cs = last_click_state + 1;
+    else
+        cs = 1;
+    last_down_cg = cg;
+    last_down_ms = t_ms;
+    last_down_pt = p;
+    last_click_state = cs;
+    held_click_state[cg] = cs;
+    return cs;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Background injection (protocol v3, experimental; main thread)            */
+/*                                                                           */
+/* Events go to the owning process with CGEventPostToPid, addressed to the   */
+/* window by number. They bypass the window server's routing and the HID /   */
+/* session event stream: the cursor is not moved, nothing is activated, and  */
+/* the helper's own session-level tap never sees them (CGEvent.h: they are   */
+/* posted "immediately before any event taps instantiated for the specified  */
+/* process"). Public API only. Never executed on a real Mac: see README.     */
+
+static int bg_mode;         /* `bg 1` seen: the next seq runs in background mode */
+static int seq_bg;          /* the running seq is a background seq */
+static int bg_access;       /* post-event access, checked when a background seq starts */
+static CGWindowID vp_win;   /* virtual pointer: the window it was last moved into (0: none) */
+static CGPoint vp_pt;       /* virtual pointer: global CG point (top-left origin, points) */
+static CGWindowID grab_win; /* window that got the first press of the held buttons */
+static NSInteger bg_evnum;  /* NSEvent eventNumber counter */
+
+/* Post-event access (TCC; granted with Accessibility). Without it every background target
+ * is skipped. Reported once, and again only after it was granted and lost. */
+static void bg_check_access(void)
+{
+    static int warned;
+    bg_access = CGPreflightPostEventAccess() ? 1 : 0;
+    if (bg_access) {
+        warned = 0;
+    } else if (!warned) {
+        warned = 1;
+        emit_error("background mode: clickered may not post events to other apps. Open System "
+                   "Settings > Privacy & Security > Accessibility and turn on clickered; until "
+                   "then background targets are skipped.");
+    }
+}
+
+/* A window a background click can be addressed to: it exists, belongs to another
+ * process, and is on screen (not minimized, hidden, or on another Space). */
+static int bg_target(CGWindowID w, WinInfo *wi)
+{
+    return bg_access && w && win_info(w, wi) && wi->pid > 0 && wi->pid != self_pid &&
+           wi->onscreen;
+}
+
+/* Mark an event as ours and address it to window w (fields 91 / 92, public since 10.7). */
+static void bg_address(CGEventRef e, CGWindowID w, CGPoint p)
+{
+    CGEventSetLocation(e, p);
+    CGEventSetIntegerValueField(e, kCGMouseEventWindowUnderMousePointer, (int64_t)w);
+    CGEventSetIntegerValueField(e, kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent,
+                                (int64_t)w);
+    CGEventSetIntegerValueField(e, kCGEventSourceUserData, INJECT_TAG);
+}
+
+/*
+ * Post one mouse event to window w at global point p. The event is built as an NSEvent
+ * carrying the window number (its location is in the window's base coordinate system:
+ * origin at the bottom-left of the frame, y up), converted with -CGEvent, then given the
+ * global location and the window-under-pointer fields. Both points are derived from the
+ * same CG (top-left origin) frame, so no display height is involved and monitor layout
+ * does not matter. Returns 0 if nothing was posted (window gone, AppKit refused).
+ */
+static int bg_post_mouse(NSEventType nt, CGWindowID w, CGPoint p, int cgbutton, int clicks,
+                         float pressure, CGPoint delta)
+{
+    WinInfo wi;
+    if (!w || !win_info(w, &wi) || wi.pid <= 0 || wi.pid == self_pid) return 0;
+    NSPoint local = NSMakePoint(p.x - wi.r.origin.x, wi.r.origin.y + wi.r.size.height - p.y);
+    int ok = 0;
+    @autoreleasepool {
+        NSEvent *ev = [NSEvent mouseEventWithType:nt
+                                         location:local
+                                    modifierFlags:0
+                                        timestamp:NSProcessInfo.processInfo.systemUptime
+                                     windowNumber:(NSInteger)w
+                                          context:nil
+                                      eventNumber:++bg_evnum
+                                       clickCount:clicks
+                                         pressure:pressure];
+        CGEventRef src = ev ? ev.CGEvent : NULL; /* owned by ev */
+        CGEventRef e = src ? CGEventCreateCopy(src) : NULL;
+        if (e) {
+            bg_address(e, w, p);
+            CGEventSetIntegerValueField(e, kCGMouseEventButtonNumber, cgbutton);
+            if (clicks > 0) CGEventSetIntegerValueField(e, kCGMouseEventClickState, clicks);
+            if (delta.x != 0 || delta.y != 0) {
+                CGEventSetIntegerValueField(e, kCGMouseEventDeltaX, (int64_t)lround(delta.x));
+                CGEventSetIntegerValueField(e, kCGMouseEventDeltaY, (int64_t)lround(delta.y));
+            }
+            CGEventPostToPid(wi.pid, e);
+            CFRelease(e);
+            ok = 1;
+        }
+    }
+    if (!ok) fprintf(stderr, "clickered-helper: background event for window %u not posted\n",
+                     (unsigned)w);
+    return ok;
+}
+
+/* NSEvent type for CG button cg: phase 0 down, 1 up, 2 dragged. */
+static NSEventType bg_type(int cg, int phase)
+{
+    static const NSEventType t[3][3] = {
+        {NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp, NSEventTypeLeftMouseDragged},
+        {NSEventTypeRightMouseDown, NSEventTypeRightMouseUp, NSEventTypeRightMouseDragged},
+        {NSEventTypeOtherMouseDown, NSEventTypeOtherMouseUp, NSEventTypeOtherMouseDragged},
+    };
+    return t[cg == 0 ? 0 : cg == 1 ? 1 : 2][phase];
+}
+
+/* Move the virtual pointer to p: a drag (to the window holding the press) while the seq
+ * holds a button, otherwise a mouse-moved to vp_win. The real cursor never moves. */
+static void bg_move(CGPoint p)
+{
+    CGPoint d = CGPointMake(p.x - vp_pt.x, p.y - vp_pt.y);
+    vp_pt = p;
+    int hb = held_cg_button();
+    if (hb >= 0) bg_post_mouse(bg_type(hb, 2), grab_win, p, hb, 0, 1.0f, d);
+    else bg_post_mouse(NSEventTypeMouseMoved, vp_win, p, 0, 0, 0.0f, d);
+}
+
+static void bg_scroll(int xb)
+{
+    WinInfo wi;
+    if (!vp_win || !win_info(vp_win, &wi) || wi.pid <= 0 || wi.pid == self_pid) return;
+    int32_t w1 = xb == 4 ? 1 : xb == 5 ? -1 : 0;
+    int32_t w2 = xb == 6 ? 1 : xb == 7 ? -1 : 0;
+    CGEventRef e = CGEventCreateScrollWheelEvent2(inj_src, kCGScrollEventUnitLine, 2, w1, w2, 0);
+    if (!e) return;
+    bg_address(e, vp_win, vp_pt);
+    CGEventSetFlags(e, 0); /* the user's modifiers belong to the app they are typing in */
+    CGEventPostToPid(wi.pid, e);
+    CFRelease(e);
+}
+
+/* d / u in background mode, at the virtual pointer. A press with no button held grabs
+ * the window it lands in (as the window server does); drags and releases go there. */
+static void bg_button(int xb, int down)
+{
+    if (xb >= 4 && xb <= 7) {
+        if (down) bg_scroll(xb); /* one tick per press; the release is a no-op */
+        return;
+    }
+    int cg = cg_button_from_x(xb);
+    if (cg < 0) return;
+    if (down) {
+        if (held_btn[xb]) return;
+        if (!any_btn_held()) {
+            if (!vp_win) {
+                fputs("clickered-helper: background press without a preceding m, ignored\n",
+                      stderr);
+                return;
+            }
+            grab_win = vp_win;
+            /* reported necessary for routing: a move into the window before each click */
+            bg_post_mouse(NSEventTypeMouseMoved, grab_win, vp_pt, 0, 0, 0.0f, CGPointZero);
+        }
+        int cs = click_state(cg, 1, vp_pt);
+        bg_post_mouse(bg_type(cg, 0), grab_win, vp_pt, cg, cs, 1.0f, CGPointZero);
+        held_btn[xb] = 1;
+    } else {
+        if (!held_btn[xb]) return; /* never pressed by this seq: nothing to release */
+        held_btn[xb] = 0;
+        bg_post_mouse(bg_type(cg, 1), grab_win, vp_pt, cg, click_state(cg, 0, vp_pt), 0.0f,
+                      CGPointZero);
+        if (!any_btn_held()) grab_win = 0;
+    }
+}
+
 static void button(int xb, int down)
 {
+    if (seq_bg) {
+        bg_button(xb, down);
+        return;
+    }
     if (xb >= 4 && xb <= 7) {
         if (down) scroll_tick(xb); /* a wheel "press" is one tick; its release is a no-op */
         return;
@@ -1594,23 +1790,7 @@ static void button(int xb, int down)
     if (cg == 0) t = down ? kCGEventLeftMouseDown : kCGEventLeftMouseUp;
     else if (cg == 1) t = down ? kCGEventRightMouseDown : kCGEventRightMouseUp;
     else t = down ? kCGEventOtherMouseDown : kCGEventOtherMouseUp;
-    int cs;
-    if (down) {
-        /* macOS apps detect double clicks from the click state, not from timing */
-        long long t_ms = now_ms();
-        if (cg == last_down_cg && t_ms - last_down_ms <= dbl_click_ms &&
-            fabs(cur.x - last_down_pt.x) <= 4 && fabs(cur.y - last_down_pt.y) <= 4)
-            cs = last_click_state + 1;
-        else
-            cs = 1;
-        last_down_cg = cg;
-        last_down_ms = t_ms;
-        last_down_pt = cur;
-        last_click_state = cs;
-        held_click_state[cg] = cs;
-    } else {
-        cs = held_click_state[cg] > 0 ? held_click_state[cg] : 1;
-    }
+    int cs = click_state(cg, down, cur);
     CGEventRef e = CGEventCreateMouseEvent(inj_src, t, cur, (CGMouseButton)cg);
     if (!e) return;
     CGEventSetIntegerValueField(e, kCGMouseEventClickState, cs);
@@ -1819,8 +1999,16 @@ static void run_seq(char *args)
         return;
     }
 
-    /* Mouse lock: while seq_running the tap drops every physical mouse event. */
+    /* Mouse lock (foreground only): while mouse_locked the tap drops every physical
+     * mouse event. A background seq leaves the user's pointer completely alone. */
+    seq_bg = bg_mode;
+    if (seq_bg) {
+        vp_win = 0;
+        grab_win = 0;
+        bg_check_access();
+    }
     seq_running = 1;
+    mouse_locked = !seq_bg;
     abort_flag = 0;
     scan_queued_abort();
     cur = pointer_pos();
@@ -1838,6 +2026,32 @@ static void run_seq(char *args)
             any_target = 1;
             CGWindowID w = (CGWindowID)o->win;
             if (skip && w == skipwin) break;
+            if (seq_bg) {
+                /* Background: never activate, raise or warp. f only checks the target; m
+                 * moves the virtual pointer. A point outside w (fraction outside 0..1)
+                 * cannot be clicked in w, so it is skipped unless a drag is in progress. */
+                WinInfo wi;
+                CGPoint p = CGPointZero;
+                int ok = bg_target(w, &wi);
+                if (ok && o->op == 'm') {
+                    p = frac_point(&wi.r, o->fx, o->fy);
+                    if (!any_btn_held() && !CGRectContainsPoint(wi.r, p)) ok = 0;
+                }
+                if (!ok) {
+                    release_all();
+                    vp_win = 0;
+                    skip = 1;
+                    skipwin = w;
+                    break;
+                }
+                skip = 0;
+                if (o->op == 'm') {
+                    vp_win = w;
+                    bg_move(p);
+                }
+                any_ok = 1;
+                break;
+            }
             if (!window_ok(w)) {
                 release_all();
                 skip = 1;
@@ -1890,6 +2104,16 @@ static void run_seq(char *args)
         case 'd':
         case 'u':
             if (skip) break;
+            if (seq_bg && o->op == 'd' && !any_btn_held() && vp_win) {
+                /* the target may have closed, minimized or left the Space during an `s` */
+                WinInfo wi;
+                if (!bg_target(vp_win, &wi)) {
+                    skip = 1;
+                    skipwin = vp_win;
+                    vp_win = 0;
+                    break;
+                }
+            }
             button((int)o->a, o->op == 'd');
             break;
         case 's':
@@ -1898,16 +2122,19 @@ static void run_seq(char *args)
             break;
         case 'w':
             skip = 0;
-            warp(CGPointMake((double)o->a, (double)o->b));
+            if (!seq_bg) warp(CGPointMake((double)o->a, (double)o->b)); /* bg: no-op */
             break;
         }
         if (seq_interrupted()) break;
     }
     int interrupted = seq_interrupted();
-    release_all();
+    release_all(); /* background: the pending mouse-ups go to the grabbed window */
     free(ops);
     suppress_until = now_ms() + POST_SEQ_SUPPRESS_MS;
-    seq_running = 0; /* unlocks the mouse */
+    seq_running = 0;
+    mouse_locked = 0; /* unlocks the mouse */
+    seq_bg = 0;
+    grab_win = 0;
     abort_flag = 0;
     emit_done(id, !interrupted && (!any_target || any_ok));
 }
@@ -1927,6 +2154,17 @@ static void exec_line(char *line)
         pick_cancel();
     } else if (strncmp(t, "seq", 3) == 0 && (t[3] == ' ' || t[3] == '\t')) {
         run_seq(trim(t + 4));
+    } else if (strncmp(t, "bg", 2) == 0 && (t[2] == ' ' || t[2] == '\t' || t[2] == 0)) {
+        /* applies to the next seq (one that is running has already read bg_mode); no reply */
+        char *a = trim(t + 2);
+        if (strcmp(a, "0") == 0) {
+            bg_mode = 0;
+        } else if (strcmp(a, "1") == 0) {
+            bg_mode = 1;
+            bg_check_access();
+        } else {
+            emit_error("bad bg argument (expected 0 or 1)"); /* mode unchanged */
+        }
     } else if (strcmp(t, "abort") == 0) {
         /* no seq running: nothing to do */
     } else {
@@ -1941,8 +2179,10 @@ static void exec_line(char *line)
 
 static void shutdown_and_exit(int code)
 {
-    seq_running = 0;
     release_all();
+    seq_running = 0;
+    mouse_locked = 0;
+    seq_bg = 0;
     pthread_mutex_lock(&g_mu);
     pick_state = 0;
     pick_rearm = 0;

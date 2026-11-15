@@ -48,6 +48,8 @@ export interface AppState {
   /** Maximum random pause in ms before replaying into each target window (one of
    *  `CLICK_DELAYS`; 0 = off, targets are replayed back to back). */
   readonly clickDelay: number
+  /** Experimental: click target windows without moving the user's mouse (see docs/PROTOCOL.md, background mode). */
+  readonly backgroundClicks: boolean
   /** Global toggle hotkey as an Electron accelerator, e.g. "Control+`". */
   readonly hotkey: string
   /** True while a gesture is being replayed into the other windows. */
@@ -74,6 +76,8 @@ export interface ClickeredApi {
   setClickOffset(px: number): void
   /** Set the maximum click delay in ms (snapped to the nearest of `CLICK_DELAYS`). */
   setClickDelay(ms: number): void
+  /** Turn experimental background clicks on or off. */
+  setBackgroundClicks(on: boolean): void
   /** Renderer reports the pixel size its content needs; main resizes the frameless window. */
   setSize(width: number, height: number): void
   quit(): void
@@ -95,5 +99,6 @@ export type IpcCommand =
   | { readonly c: "setMaster"; readonly id: WindowId | null }
   | { readonly c: "setClickOffset"; readonly px: number }
   | { readonly c: "setClickDelay"; readonly ms: number }
+  | { readonly c: "setBackgroundClicks"; readonly on: boolean }
   | { readonly c: "setSize"; readonly width: number; readonly height: number }
   | { readonly c: "quit" }

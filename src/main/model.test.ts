@@ -26,6 +26,7 @@ const model = (patch: Partial<Model> = {}): Model => ({
   masterId: null,
   clickOffset: 0,
   clickDelay: 0,
+  backgroundClicks: false,
   hotkey: "Control+`",
   busy: false,
   ...patch,

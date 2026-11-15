@@ -10,6 +10,8 @@ describe("parseCommand", () => {
     expect(parseCommand({ c: "setSize", width: 400, height: 60 })).toEqual({ c: "setSize", width: 400, height: 60 })
     expect(parseCommand({ c: "setClickOffset", px: 5 })).toEqual({ c: "setClickOffset", px: 5 })
     expect(parseCommand({ c: "setClickDelay", ms: 100 })).toEqual({ c: "setClickDelay", ms: 100 })
+    expect(parseCommand({ c: "setBackgroundClicks", on: true })).toEqual({ c: "setBackgroundClicks", on: true })
+    expect(parseCommand({ c: "setBackgroundClicks", on: false })).toEqual({ c: "setBackgroundClicks", on: false })
   })
 
   it("drops extra fields", () => {
@@ -33,6 +35,10 @@ describe("parseCommand", () => {
       { c: "setClickDelay", ms: Number.NaN },
       { c: "setClickDelay", ms: "100" },
       { c: "setClickDelay", px: 100 },
+      { c: "setBackgroundClicks" },
+      { c: "setBackgroundClicks", on: 1 },
+      { c: "setBackgroundClicks", on: "true" },
+      { c: "setBackgroundClicks", enabled: true },
       { c: "setSize", width: Infinity, height: 10 },
     ]) {
       expect(parseCommand(bad)).toBeNull()

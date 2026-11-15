@@ -1,8 +1,8 @@
 # clickered-helper.exe (Windows)
 
 Windows port of `native/helper.c`, built from `helper.c` in this directory. It speaks the same
-line protocol, **version 2** (`docs/PROTOCOL.md`; no keyboard replication: no `keys`, no `key`,
-no `kd`/`ku`, but the Escape panic key is kept). The Electron host drives it the same way it
+line protocol, **version 3** (`docs/PROTOCOL.md`; no keyboard replication: no `keys`, no `key`,
+no `kd`/`ku`, but the Escape panic key is kept; plus the experimental [background mode](#background-mode-experimental)). The Electron host drives it the same way it
 drives the X11 helper. It is plain C11 using the Win32 API only (user32, gdi32, dwmapi, ole32,
 winmm), with no third-party code.
 
@@ -79,6 +79,60 @@ Wire behaviour is otherwise identical to X11: message formats, `error` texts (`u
 …`, `bad seq op #N`, `bad seq id`, `pick already active`), parse limits, skip mode, release-all,
 queued commands, and `abort` queued behind a `seq`.
 
+## Background mode (experimental)
+
+`bg 1` makes the following seqs deliver clicks **without touching the user's pointer or the
+foreground window**; `bg 0` (the default) returns to the injection described above, which is
+unchanged. Anything other than `bg 0` / `bg 1` is an `error`.
+
+How it works, all in user space (no hooking or injection into other processes, no
+`AttachThreadInput`):
+
+* `m` aims a *virtual pointer* at a point of the target's client area. Nothing is warped,
+  grabbed or activated, and the mouse is **not locked** (the hook only swallows input for
+  foreground seqs). Minimized, missing and other-desktop windows are skipped as before.
+* The receiver is the deepest child window at that point, found by a walk down from the
+  target's top-level window: children front to back, skipping hidden, disabled and
+  `WS_EX_TRANSPARENT` ones, honouring window regions, and asking each candidate
+  `WM_NCHITTEST` (`SendMessageTimeout`, 50 ms, `SMTO_ABORTIFHUNG`) so `HTTRANSPARENT` falls
+  through to the parent. `WindowFromPoint` is not usable (it returns whatever *covers* the
+  target), and the `ChildWindowFromPoint*` family returns disabled windows or static labels.
+  Covered windows are therefore reachable.
+* Only a **client-area** hit (`HTCLIENT`) is delivered. A title bar, border, scrollbar owned by
+  the window itself, or a point outside the window is skip mode: `WM_NC*` button messages are
+  never posted (a title-bar press would start a modal move loop that follows the real cursor).
+* `d`/`u` `PostMessageW` `WM_MOUSEMOVE` then `WM_xBUTTONDOWN` (with the `MK_*` flags), later
+  `WM_xBUTTONUP`. The window that got the press also gets every later move (with the held
+  flags, throttled to one per 8 ms) and the release, coordinates re-relativized to it. That is
+  a stand-in for mouse capture and also works when the pointer leaves the window. Wheel
+  buttons 4-7 post `WM_MOUSEWHEEL` / `WM_MOUSEHWHEEL` with **screen** coordinates. `WM_SETCURSOR`
+  is never sent.
+* The system does not synthesize double clicks from posted messages, so a second press of the
+  same button on the same receiver within `GetDoubleClickTime()` and the double-click rectangle
+  is posted as `WM_xBUTTONDBLCLK` when the window class has `CS_DBLCLKS`. The memory of the last
+  press survives across seqs.
+* `PostMessage` failing (typically `ERROR_ACCESS_DENIED` for an elevated target) is skip mode.
+* Release-at-end, `abort`, Escape and stdin EOF post the pending button-up to the gesture's
+  receiver.
+* Client coordinates of targets that are not per-monitor DPI aware are scaled by
+  `GetDpiForWindow / monitor DPI` so they look like virtualized real input (best effort,
+  untested on real hardware; wheel screen coordinates are not scaled).
+* Posted messages never pass through the low-level mouse hook, so the helper cannot see its
+  own background clicks (verified in the Wine test with the real capture code). Capture is
+  otherwise unchanged: no `btn`/`motion` during a seq or for 30 ms after.
+
+Limits. This is message posting, not input, so an app has to cooperate:
+
+* Apps that read **raw input / DirectInput** or poll `GetCursorPos` / `GetAsyncKeyState` /
+  `GetKeyState` for the buttons see nothing (many games, some drawing and CAD tools).
+* **WPF, UWP / WinUI** and some Chromium/Electron versions take pointer input from a different
+  path (or only react to real input) and may ignore posted clicks. Whatever the control
+  toolkit does with `WM_NCHITTEST` decides where the click lands.
+* **Hover state drops**: the real cursor is elsewhere, so hover effects, tooltips, `WM_SETCURSOR`
+  cursors and `TrackMouseEvent` leave notifications are not driven by the helper.
+* Elevated targets are skipped (UIPI). Keyboard modifier keys are not added to `wParam`.
+* A click can make the target activate itself; the helper never does, but the app may.
+
 ## Known limits
 
 * **UIPI / elevated windows.** A non-elevated helper cannot inject input into windows of
@@ -108,9 +162,9 @@ queued commands, and `abort` queued behind a `seq`.
 ## Tested here (Linux host, Docker + Wine)
 
 `native/win/test/wine-docker.sh` cross-compiles with Debian bookworm's mingw-w64 (GCC 12) and
-runs two scripts under Wine 8 + Xvfb:
+runs three scripts under Wine 8 + Xvfb:
 
-* `test/smoke.py` checks the protocol loop: `ready` v2, `windows` at startup and on `list`
+* `test/smoke.py` checks the protocol loop: `ready` v3, `windows` at startup and on `list`
   (including a real Notepad window with title, class, pid, rect and mapped), `keys` and
   `kd`/`ku` rejected, malformed seqs giving `error` + `done ok:false`, `w`/`s` timing, skip for
   a missing window, `abort` during a sleep and right behind a seq, pick/pickcancel, stdin EOF
@@ -121,8 +175,19 @@ runs two scripts under Wine 8 + Xvfb:
   right → 3, own injected clicks not reported, pick by left click (swallowed, correct window),
   right-click pick cancel, Escape aborting a seq, idle Escape, and that no other key is ever
   reported.
+* `test/bg.py` (with `test/bgtarget.c`, a logging window with an edit, a button, nested custom
+  panels, a hidden, a disabled and a click-through child, plus an occluding window and a
+  minimized one) checks background mode: `bg` parsing, click/drag/right-click/wheel/hwheel
+  arriving at the right child with the right coordinates while the real pointer and the
+  foreground window stay put, an occluded target, a non-client / outside / missing /
+  minimized target giving `done ok:false`, double-click synthesis (within a seq, across seqs,
+  too slow, too far, third press), the mouse not being locked, no `btn`/`motion` reported,
+  `abort` and stdin EOF mid-drag posting the up, release-at-end, and foreground mode still
+  working after `bg 0`.
 
-Wine is not Windows. Foreground lock, UIPI, DPI virtualization, DWM cloaking, virtual desktops
+Wine is not Windows, and **a passing run proves nothing about real Windows behaviour**,
+background mode least of all: it only shows the helper sends the intended messages to the
+intended windows. Foreground lock, UIPI, DPI virtualization, DWM cloaking, virtual desktops
 and the real input stack are not exercised there. One Wine-only quirk: the first keyboard event
 right after the pick overlay hides is delivered late, apparently because of Wine's X focus
 handling. The capture test therefore sends one key before the post-pick Escape check. Check
@@ -165,3 +230,22 @@ windowed game) and, ideally, two monitors with different scaling (100 % and 150 
     nothing hangs, and the other targets still work.
 11. **Own input**: replays never get re-recorded as new gestures (no feedback loop).
 12. **Shutdown**: quitting the app ends the helper (stdin EOF), and nothing stays pressed.
+
+Background mode (`bg 1`; run each with the real mouse parked elsewhere, and keep using it):
+
+13. **Pointer and focus**: a background replay does not move the cursor, change the foreground
+    window or flash the taskbar. The mouse is free during a long replay.
+14. **Covered target**: a target fully behind other windows still gets the click, in the
+    child control at that spot (try a button, a text box, a list and a web view).
+15. **Drag**: dragging inside a target (selection, a slider, a scrollbar thumb, moving an item)
+    works, also when the drag leaves the target's window. Releasing early with `abort` or Escape
+    leaves nothing stuck.
+16. **Wheel / double click**: the wheel scrolls the control under the virtual pointer.
+    Double-clicking selects a word in a text box, or opens a list item.
+17. **Skipped**: a point on the title bar or border, a minimized window, a closed window and
+    an elevated (administrator) target are skipped, `done` is `ok:false` when nothing was left,
+    and the other targets still work.
+18. **Own input**: background clicks are never captured as new gestures.
+19. **Per-app survey**: record which apps honour posted clicks. Check DPI-unaware apps on a
+    150 % monitor for coordinate offsets, and expect Chromium/Electron, WPF, UWP/WinUI and
+    games to be the unreliable ones (see the limits above).

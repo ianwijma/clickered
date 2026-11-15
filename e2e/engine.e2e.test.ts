@@ -2,6 +2,7 @@
  * Real helper + real engine + fake WM on Xvfb. "Physical" input goes in through the
  * Xvfb's own devices; assertions are on what the fake WM's windows actually received.
  */
+import { execFileSync } from "node:child_process"
 import { mkdtempSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -216,5 +217,67 @@ describe("engine e2e (real helper, Xvfb)", () => {
     const motions = wm.on("B", "motion")
     // Aborted well before the end of the path.
     expect(Math.max(...motions.map((m) => m.x ?? 0))).toBeLessThan(300)
+  })
+})
+
+describe("engine e2e: background mode (second master pointer)", () => {
+  const masters = () =>
+    execFileSync("xinput", ["list", "--name-only"], { encoding: "utf8" })
+      .split("\n")
+      .filter((l) => l.startsWith("clickered-bg"))
+
+  it("replays into an uncovered target without raising it or touching the user's pointer", async () => {
+    const { engine } = await start([wm.ids.A, wm.ids.B], { config: { backgroundClicks: true } })
+    await waitFor(() => masters().includes("clickered-bg pointer"), "background master created")
+    const at = inA(0.5, 0.05) // B's top strip is not covered by C
+    phys.click(...at)
+
+    await waitFor(() => wm.on("B", "release").length === 1, "background click on B")
+    const [press] = wm.on("B", "press")
+    near(press?.x, 200)
+    near(press?.y, 15, 2)
+    expect(wm.on("B", "activate")).toHaveLength(0)
+    expect(wm.on("C", "press")).toHaveLength(0)
+    await waitFor(() => !engine.getState().busy, "replay finished")
+    // The helper did not warp the real pointer: it is still where the physical click left it.
+    const p = pointer()
+    expect([p.x, p.y]).toEqual(at)
+  })
+
+  it("skips a target that is covered instead of raising it", async () => {
+    const { engine } = await start([wm.ids.A, wm.ids.B], { config: { backgroundClicks: true } })
+    phys.click(...inA(0.5, 0.5)) // the same spot of B is under C
+    await waitFor(() => wm.on("A", "press").length === 1, "physical click")
+    await sleep(600)
+    await waitFor(() => !engine.getState().busy, "replay finished")
+    expect(wm.on("B", "press")).toHaveLength(0)
+    expect(wm.on("C", "press")).toHaveLength(0)
+    expect(wm.on("B", "activate")).toHaveLength(0)
+  })
+
+  it("replays a drag in the background", async () => {
+    await start([wm.ids.A, wm.ids.B], { config: { backgroundClicks: true } })
+    await phys.drag(inA(0.1, 0.02), inA(0.6, 0.05), 12, 240)
+    await waitFor(() => wm.on("B", "release").length === 1, "background drag on B", 8000)
+    const all = wm.on("B")
+    const b = all.slice(all.findIndex((e) => e.ev === "press"))
+    expect(b[0]?.ev).toBe("press")
+    expect(b.at(-1)?.ev).toBe("release")
+    expect(b.filter((e) => e.ev === "motion").length).toBeGreaterThanOrEqual(3)
+    expect(wm.on("B", "activate")).toHaveLength(0)
+  })
+
+  it("setBackgroundClicks switches the helper at runtime, and shutdown removes the master", async () => {
+    const { engine: e } = await start([wm.ids.A, wm.ids.B])
+    expect(masters()).toEqual([])
+    e.command({ c: "setBackgroundClicks", on: true })
+    await waitFor(() => masters().includes("clickered-bg pointer"), "master created by the setting")
+    e.command({ c: "setBackgroundClicks", on: false })
+    await waitFor(() => masters().length === 0, "master removed by the setting")
+    e.command({ c: "setBackgroundClicks", on: true })
+    await waitFor(() => masters().length > 0, "master back")
+    await e.shutdown()
+    engine = null
+    expect(masters()).toEqual([])
   })
 })

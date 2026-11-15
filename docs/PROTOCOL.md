@@ -1,4 +1,4 @@
-# Helper protocol (version 2)
+# Helper protocol (version 3)
 
 The native helper is spawned by the Electron main process. There is one per OS, and
 all three speak this protocol (see [Platforms](#platforms) for where they differ). This
@@ -31,7 +31,7 @@ top-level child of root under the pointer; the client window is the
 
 | Message | Meaning |
 |---|---|
-| `{"t":"ready","version":2}` | Sent once at startup, followed by a `windows` message. |
+| `{"t":"ready","version":3}` | Sent once at startup, followed by a `windows` message. |
 | `{"t":"windows","active":ID,"list":[{"id","title","cls","pid","x","y","w","h","mapped"}]}` | Full client list. Sent at startup, on `list`, and (debounced ~100 ms) whenever `_NET_CLIENT_LIST` or `_NET_ACTIVE_WINDOW` changes. `x,y,w,h` = content rect. `cls` = WM_CLASS class part. `title` = `_NET_WM_NAME`, falling back to `WM_NAME`. Strings JSON-escaped, valid UTF-8. |
 | `{"t":"btn","down":BOOL,"button":N,"win":ID,"fx":F,"fy":F,"x":N,"y":N,"time":MS}` | Physical button transition. See gesture window below. |
 | `{"t":"motion","win":ID,"fx":F,"fy":F,"x":N,"y":N,"time":MS}` | Only while ≥1 physical button is held; at most one per 8 ms. |
@@ -66,6 +66,7 @@ press immediately followed by a release.
 | `pickcancel` | Cancel an active pick. No-op otherwise. |
 | `seq ID OP;OP;...` | Execute ops in order, then reply `done`. |
 | `abort` | Abort the running `seq` (if any) as soon as possible. |
+| `bg 0` / `bg 1` | Leave / enter [background mode](#background-mode-experimental-version-3). |
 
 ### seq ops
 
@@ -98,6 +99,50 @@ Rules:
 - `XFlush`/`XSync` after every injected event.
 - A custom X error handler must swallow `BadWindow`/`BadMatch`/`BadDrawable`
   (windows vanish at any time); the helper must never die from them.
+
+## Background mode (experimental, version 3)
+
+`bg 1` switches the helper to background mode, `bg 0` back to the default (foreground)
+mode. The helper starts in foreground mode and sends no reply. Like every command other
+than `abort`, a `bg` that arrives during a `seq` is queued and applies to the next one.
+Any argument other than `0` or `1` is an `error`.
+
+In background mode a `seq` must leave the user's pointer alone:
+
+- **No mouse lock, no warp.** The physical pointer is never grabbed, moved or hidden,
+  and the user can keep using it while the `seq` runs.
+- **No activation.** The helper never activates, raises or focuses a window itself.
+  (Whether the target reacts to the click by activating itself is up to the target and
+  the window manager.)
+- `m WIN FX FY` moves a **virtual pointer** to that fraction of WIN's content rect. If
+  WIN does not exist or is unmapped, or the platform cannot deliver a click to that
+  point without touching the real pointer (see the per-OS notes), enter skip mode for
+  WIN. There is **no fallback to foreground replay**: a target that cannot be reached
+  in the background is skipped.
+- `d BTN` / `u BTN` press and release at the virtual pointer's position. Moves between
+  a `d` and its `u` are delivered as a drag. Wheel buttons 4–7 work as in foreground
+  mode.
+- `f WIN` only checks that WIN exists and is mapped (skip mode if not).
+- `w X Y` does nothing except end skip mode.
+- `s`, `abort`, `esc`, skip mode, release-at-end and stdin EOF behave as in foreground
+  mode.
+- **Capture is unchanged**: no `btn`/`motion` is reported while a `seq` runs nor for
+  30 ms after, and the helper's own background clicks are never reported.
+- `done` has `ok:false` if every target was skipped, as in foreground mode.
+
+How each helper delivers background clicks:
+
+- **X11**: a second master pointer (XInput2 multi-pointer), created on `bg 1` with a
+  fixed name prefix and removed on `bg 0` and at exit; masters left over from a crash
+  are removed at startup. Events are injected on that master's own XTEST device. The
+  click goes to whatever is topmost at that point, so `m` enters skip mode when the
+  client window under the virtual pointer is not WIN (the point is covered) or when the
+  user's own pointer is inside WIN.
+- **Windows**: mouse messages posted to the deepest enabled, visible child window at
+  the point. Covered windows are reachable. `m`/`d` enter skip mode when the point is
+  not in a client area or the post is refused (elevated target).
+- **macOS**: mouse events posted to the owning process (`CGEventPostToPid`), addressed
+  to the window. Public APIs only.
 
 ## Platforms
 
@@ -148,6 +193,8 @@ the same everywhere. What differs:
 
 ## Changes
 
+- **Version 3**: the `bg` command and background mode were added. Foreground behaviour
+  is unchanged.
 - **Version 2**: keyboard replication was removed — the `keys` command, the `key`
   message and the `kd`/`ku` seq ops no longer exist (they are rejected as unknown).
   The `esc` panic key is unchanged.

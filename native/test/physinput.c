@@ -4,6 +4,8 @@
  *   physinput b BTN 1|0     button press/release
  *   physinput m X Y         absolute motion
  *   physinput k CODE 1|0    key press/release
+ * The environment variable PHYS_DEV names another pointer device to drive instead of
+ * "Xvfb mouse" (e.g. "clickered-bg XTEST pointer", the helper's background pointer).
  * Build: cc -o physinput physinput.c $(pkg-config --libs x11 xi xtst)
  */
 #include <X11/Xlib.h>
@@ -32,7 +34,8 @@ int main(int argc, char **argv)
         if (!kb) return 3;
         XTestFakeDeviceKeyEvent(d, kb, (unsigned)a, b, NULL, 0, CurrentTime);
     } else {
-        XDevice *ms = open_named(d, "Xvfb mouse");
+        const char *dev = getenv("PHYS_DEV");
+        XDevice *ms = open_named(d, dev && *dev ? dev : "Xvfb mouse");
         if (!ms) return 3;
         if (argv[1][0] == 'b') {
             XTestFakeDeviceButtonEvent(d, ms, (unsigned)a, b, NULL, 0, CurrentTime);

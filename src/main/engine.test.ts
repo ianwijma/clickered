@@ -264,6 +264,38 @@ describe("engine (fake helper)", () => {
     expect(store.get().clickDelay).toBe(500)
   })
 
+  it("tells the helper the background setting after ready, and again on change", async () => {
+    const { engine, store, fake } = setup({})
+    const bgLines = () => fake.log().filter((l) => l.startsWith("bg"))
+    await waitFor(() => bgLines().length === 1)
+    expect(bgLines()).toEqual(["bg 0"])
+    expect(engine.getState().backgroundClicks).toBe(false)
+    engine.command({ c: "setBackgroundClicks", on: true })
+    await waitFor(() => bgLines().length === 2)
+    expect(bgLines()).toEqual(["bg 0", "bg 1"])
+    expect(engine.getState().backgroundClicks).toBe(true)
+    expect(store.get().backgroundClicks).toBe(true)
+    engine.command({ c: "setBackgroundClicks", on: false })
+    await waitFor(() => bgLines().length === 3)
+    expect(bgLines()).toEqual(["bg 0", "bg 1", "bg 0"])
+    expect(store.get().backgroundClicks).toBe(false)
+  })
+
+  it("sends bg 1 right after ready when the setting was saved on", async () => {
+    const { engine, fake } = setup({ config: { backgroundClicks: true } })
+    await waitFor(() => fake.log().includes("bg 1"))
+    expect(engine.getState().backgroundClicks).toBe(true)
+  })
+
+  it("replays without pointer restore or re-focus in background mode", async () => {
+    const { seqs } = setup({
+      config: { backgroundClicks: true },
+      events: [btn(true, 1, 20, 0.5, 0.25, 1020, 383, 1000), btn(false, 1, 20, 0.5, 0.25, 1021, 383, 1060)],
+    })
+    await waitFor(() => seqs().length === 1)
+    expect(seqs()[0]).toBe("seq 1 m 10 0.50000 0.25000;s 25;d 1;s 35;u 1;s 20;m 30 0.50000 0.25000;s 25;d 1;s 35;u 1;s 20")
+  })
+
   it("stays busy through a slow (delayed) replay and does not time it out", async () => {
     // The fake answers after 1.2 s; with a 500 ms max delay per target that is a plausible replay.
     const { engine, seqs, fake } = setup({

@@ -240,6 +240,8 @@ export interface ScriptOptions {
   readonly sizeOf?: (win: WindowId) => { readonly w: number; readonly h: number } | undefined
   /** Maximum random pause in ms before replaying into each target (0 / omitted = no pause). */
   readonly clickDelay?: number
+  /** Background mode: the user's pointer never moves, so no pointer restore (`w`) and no re-focus (`f`) at the end. */
+  readonly backgroundClicks?: boolean
   /** Uniform [0, 1) random source (default `Math.random`). */
   readonly rng?: () => number
 }
@@ -302,6 +304,7 @@ export const buildScript = (g: Gesture, targets: ReadonlyArray<WindowId>, opts: 
       break
     }
   }
+  if (opts.backgroundClicks) return ops
   const back = restorePoint(g)
   if (back) ops.push({ op: "w", x: back.x, y: back.y })
   ops.push({ op: "f", win: g.source })

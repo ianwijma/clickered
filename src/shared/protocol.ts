@@ -15,7 +15,7 @@
 export type WindowId = number
 
 /** Protocol version the host speaks; the helper announces its own in `ready`. */
-export const PROTOCOL_VERSION = 2
+export const PROTOCOL_VERSION = 3
 
 export interface HelperWindow {
   readonly id: WindowId
@@ -89,6 +89,8 @@ export type HelperCommand =
   | { readonly c: "pickcancel" }
   | { readonly c: "seq"; readonly id: number; readonly ops: ReadonlyArray<SeqOp> }
   | { readonly c: "abort" }
+  /** Background mode on/off (experimental, protocol v3): clicks without touching the user's pointer. No reply. */
+  | { readonly c: "bg"; readonly on: boolean }
 
 const num = (n: number): string => (Number.isInteger(n) ? String(n) : n.toFixed(5))
 
@@ -116,6 +118,8 @@ export const encodeCommand = (cmd: HelperCommand): string => {
     case "pickcancel":
     case "abort":
       return cmd.c
+    case "bg":
+      return cmd.on ? "bg 1" : "bg 0"
     case "seq":
       return `seq ${cmd.id} ${cmd.ops.map(encodeOp).join(";")}`
   }

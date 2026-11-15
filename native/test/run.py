@@ -90,7 +90,7 @@ def buttons_down():
 
 h, hr = start()
 got, win = hr.until(lambda m: m["t"] == "windows")
-check(got[0] == {"t": "ready", "version": 2}, "ready first")
+check(got[0] == {"t": "ready", "version": 3}, "ready first")
 byid = {w["id"]: w for w in win["list"]}
 check((byid[A]["x"], byid[A]["y"], byid[A]["w"], byid[A]["h"]) == (4, 30, 632, 374),
       "A content rect = wine-style child 632x374+4+30: %r" % byid[A])
@@ -305,6 +305,253 @@ time.sleep(0.3)
 h.terminate()
 rc = h.wait(timeout=2)
 check(rc == 0 and buttons_down() == 0, "SIGTERM: released, exit 0")
+
+# =========================================================================
+# Background mode (protocol v3): a second master pointer, the user's pointer untouched
+# =========================================================================
+def masters():
+    out = subprocess.run(["xinput", "list", "--name-only"], capture_output=True, text=True).stdout
+    return [l for l in out.splitlines() if l.startswith("clickered-bg")]
+
+
+def primary_pos():
+    from Xlib import display
+    d = display.Display()
+    q = d.screen().root.query_pointer()
+    d.close()
+    return (q.root_x, q.root_y)
+
+
+def bg_button_down():
+    out = subprocess.run(["xinput", "query-state", "clickered-bg XTEST pointer"],
+                         capture_output=True, text=True).stdout
+    return "=down" in out
+
+
+def bgenv(*a):
+    env = dict(os.environ, PHYS_DEV="clickered-bg XTEST pointer")
+    subprocess.run([PHYS] + [str(x) for x in a], check=True, env=env)
+
+
+def presses(evs):
+    return [e for e in evs if e["ev"] in ("press", "release")]
+
+
+subprocess.run(["xdotool", "mousemove", "900", "600"])
+# C on top of B again (the foreground tests above left B raised)
+xd.create_resource_object("window", C).configure(stack_mode=XX.Above)
+xroot.change_property(xd.intern_atom("_NET_ACTIVE_WINDOW"), Xatom.WINDOW, 32, [C])
+xd.sync()
+wmr.lines(0.2)
+h, hr = start()
+hr.until(lambda m: m["t"] == "windows")
+check(not masters(), "no background master before bg 1")
+send(h, "bg 1")
+got = hr.lines(0.4)
+check(got == [], "bg 1: no reply: %r" % got)
+check(sorted(masters()) == ["clickered-bg XTEST keyboard", "clickered-bg XTEST pointer",
+                            "clickered-bg keyboard", "clickered-bg pointer"], "bg 1 creates the master: %r" % masters())
+send(h, "bg 1")  # idempotent
+check(hr.lines(0.2) == [] and masters().count("clickered-bg pointer") == 1, "bg 1 twice: still one master")
+
+# click lands at the right place, primary pointer unchanged, nothing reported
+before = primary_pos()
+check(before == (900, 600), "primary pointer parked at 900,600: %r" % (before,))
+send(h, "seq 100 m %d 0.5 0.25;d 1;s 30;u 1" % A)
+got, done = hr.until(lambda m: m["t"] == "done")
+ev = wmr.lines(0.3)
+check(done == {"t": "done", "id": 100, "ok": True}, "bg click: done ok")
+check([(e["ev"], e["win"], e["x"], e["y"]) for e in presses(ev)] ==
+      [("press", "A.child", 316, 93), ("release", "A.child", 316, 93)],
+      "bg click at fraction (0.5,0.25) of A content: %r" % presses(ev))
+check(primary_pos() == before, "bg click: primary pointer did not move: %r" % (primary_pos(),))
+check(not [e for e in ev if e["ev"] in ("activate", "refuse")], "bg click: nothing activated")
+check(buttons_down() == 0 and not bg_button_down(), "bg click: no stuck button")
+check(not [m for m in got + hr.lines(0.2) if m["t"] in ("btn", "motion")], "bg click not reported as btn/motion")
+
+# click on B at a point not covered by C
+send(h, "seq 101 m %d 0.1 0.1;d 3;u 3" % B)
+_, done = hr.until(lambda m: m["t"] == "done")
+pr = presses(wmr.lines(0.3))
+check(done["ok"] and [(e["ev"], e["win"], e["x"], e["y"], e["detail"]) for e in pr] ==
+      [("press", "B", 40, 30, 3), ("release", "B", 40, 30, 3)], "bg right-click on B: %r" % pr)
+check(primary_pos() == before, "primary still unchanged")
+
+# drag, including leaving the window
+send(h, "seq 102 m %d 0.1 0.1;d 1;m %d 0.2 0.2;s 10;m %d 0.3 0.3;s 10;m %d 1.2 0.3;u 1" % (A, A, A, A))
+_, done = hr.until(lambda m: m["t"] == "done")
+ev = wmr.lines(0.3)
+ev = [e for e in ev if e["ev"] in ("press", "release", "motion")]
+ev = ev[[e["ev"] for e in ev].index("press"):]  # drop hover motion before the press
+kinds = [e["ev"] for e in ev]
+check(done["ok"] and kinds[:1] == ["press"] and kinds[-1:] == ["release"] and "motion" in kinds
+      and ev[-1]["rx"] == 4 + int(1.2 * 632) and ev[0]["x"] == int(0.1 * 632) and ev[0]["y"] == int(0.1 * 374),
+      "bg drag press/motion/release with correct coordinates: %r" % kinds)
+check(primary_pos() == before and not bg_button_down(), "bg drag: primary pointer unchanged, no stuck button")
+
+# wheel
+send(h, "seq 103 m %d 0.5 0.5;d 4;u 4" % A)
+_, done = hr.until(lambda m: m["t"] == "done")
+pr = presses(wmr.lines(0.3))
+check(done["ok"] and [(e["ev"], e["detail"]) for e in pr] == [("press", 4), ("release", 4)], "bg wheel: %r" % pr)
+
+# no mouse lock: a physical move during the seq moves the real pointer
+if PHYS:
+    send(h, "seq 104 m %d 0.5 0.5;d 1;s 600;u 1" % A)
+    time.sleep(0.2)
+    phys("m", 950, 650)
+    check(primary_pos() == (950, 650), "bg: no mouse lock, physical move works during the seq: %r" % (primary_pos(),))
+    _, done = hr.until(lambda m: m["t"] == "done")
+    pr = presses(wmr.lines(0.3))
+    check(done["ok"] and [e["ev"] for e in pr] == ["press", "release"] and pr[0]["win"] == "A.child"
+          and pr[1]["win"] == "A.child", "bg: seq completed despite the physical move: %r" % pr)
+    subprocess.run(["xdotool", "mousemove", "900", "600"])
+    wmr.lines(0.1)
+    before = primary_pos()
+
+# covered point (C covers the centre of B): skipped, nothing clicked, nothing raised
+send(h, "seq 105 m %d 0.5 0.5;d 1;s 2000;u 1" % B)
+t0 = time.time()
+_, done = hr.until(lambda m: m["t"] == "done")
+ev = wmr.lines(0.3)
+check(done == {"t": "done", "id": 105, "ok": False} and time.time() - t0 < 1, "bg covered point: done ok false")
+check(not presses(ev) and not [e for e in ev if e["ev"] in ("activate", "refuse")],
+      "bg covered point: no click on B or C, no activation: %r" % ev)
+check(primary_pos() == before and not bg_button_down(), "bg covered point: primary unchanged")
+
+# missing window / partial skip
+send(h, "seq 106 m 12345 0.5 0.5;d 1;s 2000;u 1;f 777")
+_, done = hr.until(lambda m: m["t"] == "done")
+check(done == {"t": "done", "id": 106, "ok": False}, "bg missing window: done ok false")
+send(h, "seq 107 f 12345;d 1;u 1;m %d 0.5 0.5;d 1;u 1;m %d 0.5 0.5;d 1;u 1" % (A, B))
+_, done = hr.until(lambda m: m["t"] == "done")
+pr = presses(wmr.lines(0.3))
+check(done["ok"] and [(e["ev"], e["win"]) for e in pr] == [("press", "A.child"), ("release", "A.child")],
+      "bg partial skip: only A clicked, covered B skipped: %r" % pr)
+send(h, "seq 108 f %d;d 1;u 1" % A)  # f only checks existence; w only ends skip
+_, done = hr.until(lambda m: m["t"] == "done")
+check(done["ok"] and not presses(wmr.lines(0.2)), "bg f: existence only, no click without m")
+send(h, "seq 109 m 12345 0.5 0.5;w 5 5;d 1;u 1")
+_, done = hr.until(lambda m: m["t"] == "done")
+check(not done["ok"] and primary_pos() == before, "bg w: no warp, ends skip only")
+wmr.lines(0.2)
+
+# the user's own pointer inside the target: skipped
+subprocess.run(["xdotool", "mousemove", "300", "200"])
+wmr.lines(0.2)
+send(h, "seq 110 m %d 0.1 0.1;d 1;u 1" % A)
+_, done = hr.until(lambda m: m["t"] == "done")
+check(done == {"t": "done", "id": 110, "ok": False} and not presses(wmr.lines(0.3)),
+      "bg: user's pointer inside the target -> skipped")
+subprocess.run(["xdotool", "mousemove", "900", "600"])
+wmr.lines(0.1)
+before = primary_pos()
+
+# the helper's own background pointer is never reported (outside a seq, after the suppress window)
+if PHYS:
+    time.sleep(0.1)
+    bgenv("m", 100, 100); bgenv("b", 1, 1); bgenv("m", 120, 120); bgenv("b", 1, 0)
+    got = hr.lines(0.4)
+    check([m for m in got if m["t"] in ("btn", "motion")] == [],
+          "events of the bg XTEST pointer are not reported: %r" % got)
+    wmr.lines(0.1)
+    phys("m", 100, 100); phys("b", 1, 1); phys("b", 1, 0)
+    got = [m for m in hr.lines(0.3) if m["t"] == "btn"]
+    check(len(got) == 2, "control: a physical click is still reported in bg mode")
+    subprocess.run(["xdotool", "mousemove", "900", "600"])
+    wmr.lines(0.1)
+
+# abort mid-drag releases the button on the virtual pointer
+send(h, "seq 111 m %d 0.5 0.5;d 1;s 5000;u 1" % A)
+time.sleep(0.3)
+check(bg_button_down(), "bg: button held on the virtual pointer during the sleep")
+check(buttons_down() == 0, "bg: ... and not on the user's pointer")
+send(h, "abort")
+_, done = hr.until(lambda m: m["t"] == "done")
+ev = wmr.lines(0.3)
+check(done == {"t": "done", "id": 111, "ok": False}, "bg abort: done ok false")
+check(not bg_button_down() and [e["ev"] for e in presses(ev)] == ["press", "release"],
+      "bg abort mid-drag released the virtual button: %r" % presses(ev))
+
+# bad argument
+send(h, "bg 2")
+got = hr.lines(0.3)
+check([m["t"] for m in got] == ["error"], "bg 2 -> error: %r" % got)
+send(h, "bg")
+got = hr.lines(0.3)
+check([m["t"] for m in got] == ["error"], "bare bg -> error: %r" % got)
+check("clickered-bg pointer" in masters(), "bad bg leaves the mode unchanged")
+
+# a bg queued behind a seq applies to the next seq
+send(h, "seq 112 s 300")
+send(h, "bg 0")
+send(h, "seq 113 m %d 0.5 0.25;d 1;u 1" % A)
+got, d2 = hr.until(lambda m: m["t"] == "done" and m["id"] == 113)
+check(not masters(), "bg 0 removes the master (queued behind a seq)")
+pr = presses(wmr.lines(0.3))
+check(d2["ok"] and primary_pos() == (320, 123),
+      "foreground seq after bg 0 warps the real pointer: %r" % (primary_pos(),))
+check([e["ev"] for e in pr] == ["press", "release"], "foreground click after bg 0: %r" % pr)
+
+# foreground still raises covered windows after bg 1 / bg 0
+send(h, "bg 1"); send(h, "bg 0")
+hr.lines(0.2)
+send(h, "seq 114 m %d 0.5 0.5;d 1;u 1" % B)
+_, done = hr.until(lambda m: m["t"] == "done")
+ev = wmr.lines(0.3)
+pr = presses(ev)
+check(done["ok"] and {"ev": "activate", "win": "B"} in [{k: e[k] for k in ("ev", "win")} for e in ev]
+      and len(pr) == 2 and pr[0]["win"] == "B", "foreground raise+click still works after bg 0")
+xd.create_resource_object("window", C).configure(stack_mode=XX.Above)
+xroot.change_property(xd.intern_atom("_NET_ACTIVE_WINDOW"), Xatom.WINDOW, 32, [C])
+xd.sync()
+wmr.lines(0.2)
+
+# stdin EOF while in bg mode with a button held: master removed, button released
+send(h, "bg 1")
+hr.lines(0.2)
+send(h, "seq 115 m %d 0.5 0.5;d 1;s 5000" % A)
+time.sleep(0.3)
+check(bg_button_down(), "bg: held before EOF")
+h.stdin.close()
+rc = h.wait(timeout=3)
+ev = [e["ev"] for e in wmr.lines(0.3)]
+check(rc == 0 and not masters() and "release" in ev, "EOF in bg mode: exit 0, master removed, button released (%r)" % ev)
+
+# SIGTERM in bg mode
+h, hr = start()
+hr.until(lambda m: m["t"] == "windows")
+send(h, "bg 1"); hr.lines(0.2)
+check(bool(masters()), "master back")
+send(h, "seq 116 m %d 0.5 0.5;d 1;s 5000" % A)
+time.sleep(0.3)
+h.terminate()
+rc = h.wait(timeout=3)
+check(rc == 0 and not masters(), "SIGTERM in bg mode: master removed")
+wmr.lines(0.2)
+
+# kill -9 leaves the master (and its held button); the next start removes it
+h, hr = start()
+hr.until(lambda m: m["t"] == "windows")
+send(h, "bg 1"); hr.lines(0.2)
+send(h, "seq 117 m %d 0.5 0.5;d 1;s 5000" % A)
+time.sleep(0.3)
+h.kill(); h.wait()
+check("clickered-bg pointer" in masters() and bg_button_down(), "kill -9 leaves the stale master with a held button")
+wmr.lines(0.2)
+h, hr = start()
+hr.until(lambda m: m["t"] == "windows")
+ev = [e["ev"] for e in wmr.lines(0.3)]
+check(not masters() and "release" in ev, "next start removes the stale master and its held button (%r)" % ev)
+h.stdin.close(); h.wait(timeout=3)
+
+# foreground-only run: bg never requested -> no master is ever created
+h, hr = start()
+hr.until(lambda m: m["t"] == "windows")
+send(h, "seq 118 m %d 0.5 0.25;d 1;u 1" % A)
+hr.until(lambda m: m["t"] == "done")
+check(not masters(), "foreground helper creates no master")
+h.stdin.close(); h.wait(timeout=3)
 
 wm.kill()
 print("FAILURES:", fails)

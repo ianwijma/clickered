@@ -32,6 +32,7 @@ const base: AppState = {
   masterId: null,
   clickOffset: 0,
   clickDelay: 0,
+  backgroundClicks: false,
   hotkey: "Control+`",
   busy: false,
 }
@@ -109,6 +110,7 @@ export function installMock(): ClickeredApi {
       }),
     setClickOffset: (clickOffset) => set({ clickOffset }),
     setClickDelay: (clickDelay) => set({ clickDelay }),
+    setBackgroundClicks: (backgroundClicks) => set({ backgroundClicks }),
     setSize: (width, height) => {
       outline.style.width = `${width}px`
       outline.style.height = `${height}px`

@@ -20,6 +20,7 @@ describe("sanitizeConfig", () => {
       groupLabel: "Game",
       clickOffset: 15,
       clickDelay: 300,
+      backgroundClicks: true,
       hotkey: "Alt+F1",
       bar: { x: 10.4, y: 20.6 },
       timing: { clickHold: 50 },
@@ -29,6 +30,7 @@ describe("sanitizeConfig", () => {
       groupLabel: "Game",
       clickOffset: 15,
       clickDelay: 300,
+      backgroundClicks: true,
       hotkey: "Alt+F1",
       bar: { x: 10, y: 21 },
       timing: { clickHold: 50 },
@@ -41,6 +43,7 @@ describe("sanitizeConfig", () => {
       groupLabel: "orphan label",
       clickOffset: "5",
       clickDelay: "100",
+      backgroundClicks: "yes",
       hotkey: 5,
       bar: { x: 1 },
       timing: "fast",
@@ -56,6 +59,13 @@ describe("sanitizeConfig", () => {
     expect(sanitizeConfig({ clickOffset: 100 }).clickOffset).toBe(20)
     expect(sanitizeConfig({ clickOffset: -3 }).clickOffset).toBe(0)
     for (const bad of [Number.NaN, Infinity, "10", null, true]) expect(sanitizeConfig({ clickOffset: bad }).clickOffset).toBe(0)
+  })
+
+  it("loads background clicks tolerantly: only true enables it", () => {
+    expect(DEFAULT_CONFIG.backgroundClicks).toBe(false)
+    expect(sanitizeConfig({ backgroundClicks: true }).backgroundClicks).toBe(true)
+    expect(sanitizeConfig({}).backgroundClicks).toBe(false)
+    for (const bad of [false, 1, "true", "1", null, [], {}]) expect(sanitizeConfig({ backgroundClicks: bad }).backgroundClicks).toBe(false)
   })
 
   it("snaps the click delay to the nearest allowed value", () => {

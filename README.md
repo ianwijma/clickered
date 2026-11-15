@@ -90,8 +90,12 @@ Clickered (Terminal, your editor), not to Clickered itself.
      instead of the exact same spot.
    - **Click delay**: a random pause of up to 50–500 ms before each other window is
      replayed into, instead of hitting them all back to back.
+6. **Background clicks** (experimental, off by default): click the other windows
+   without moving your mouse, so you can keep using it during a replay. Clicks into a
+   window that is covered by another one are skipped on Linux, and some apps (notably
+   games) ignore background clicks, so test it with your game first.
 
-The mouse is locked while a replay runs, so moving it cannot disturb the other windows.
+Unless Background clicks is on, the mouse is locked while a replay runs, so moving it cannot disturb the other windows.
 
 ## Test
 

@@ -28,6 +28,8 @@ export const parseCommand = (u: unknown): IpcCommand | null => {
       return isNum(o["px"]) ? { c: "setClickOffset", px: o["px"] } : null
     case "setClickDelay":
       return isNum(o["ms"]) ? { c: "setClickDelay", ms: o["ms"] } : null
+    case "setBackgroundClicks":
+      return isBool(o["on"]) ? { c: "setBackgroundClicks", on: o["on"] } : null
     case "setSize":
       return isNum(o["width"]) && isNum(o["height"]) ? { c: "setSize", width: o["width"], height: o["height"] } : null
     default:

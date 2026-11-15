@@ -2,7 +2,8 @@
  * clickered-helper.exe — Windows input capture / replay helper for clickered.
  *
  * Windows port of native/helper.c. Same wire protocol (docs/PROTOCOL.md, protocol
- * version 2: no keyboard replication, Escape panic key only):
+ * version 3: no keyboard replication, Escape panic key only; optional background mode
+ * that posts window messages instead of injecting input):
  *   stdout: one JSON object per line (each line written whole)
  *   stdin : one command per line
  *   stderr: diagnostics
@@ -59,7 +60,7 @@
 #pragma comment(lib, "winmm.lib")
 #endif
 
-#define PROTOCOL_VERSION 2
+#define PROTOCOL_VERSION 3
 #define MOTION_INTERVAL_MS 8
 #define POST_SEQ_SUPPRESS_MS 30
 #define WINDOWS_DEBOUNCE_MS 100
@@ -74,6 +75,10 @@
 #define LOCK_STALE_MS 1000
 /* Time allowed for an injected absolute move to show up in GetCursorPos. */
 #define WARP_SETTLE_MS 50
+/* Background mode: WM_NCHITTEST timeout per candidate window, and minimum spacing of
+ * posted drag moves. */
+#define BG_HITTEST_TIMEOUT_MS 50
+#define BG_MOVE_INTERVAL_MS 8
 /* Tag on every event we inject (MOUSEINPUT.dwExtraInfo). */
 #define INJECT_MAGIC ((ULONG_PTR)0x434C4B52u) /* "CLKR" */
 
@@ -120,6 +125,7 @@ static volatile LONG windows_dirty;
 
 /* [cs] seq / pick state read by the hooks */
 static int seq_running;
+static int seq_bg; /* the running seq is a background seq: the mouse is not locked */
 static long long suppress_until;
 static long long heartbeat;
 /* pick: 0 idle, 1 waiting for click, 2 replied, waiting for that button's release */
@@ -700,7 +706,7 @@ static LRESULT CALLBACK mouse_hook(int code, WPARAM wp, LPARAM lp)
     long long t = now_ms();
     int swallow = 0, wake = 0;
     EnterCriticalSection(&cs);
-    int lock = seq_running && t - heartbeat < LOCK_STALE_MS;
+    int lock = seq_running && !seq_bg && t - heartbeat < LOCK_STALE_MS;
     int suppressed = seq_running || t < suppress_until || pick_state != 0;
     unsigned bit = 1u << button;
     if (wp == WM_MOUSEMOVE) {
@@ -1350,8 +1356,15 @@ static int inject_button(int b, int down)
     return 1;
 }
 
+static int bg_recv_active(void);
+static void bg_release_all(void);
+
 static void release_all(void)
 {
+    if (bg_recv_active()) {
+        bg_release_all();
+        return;
+    }
     for (int i = 0; i < 256; i++)
         if (held_btn[i]) inject_button(i, 0);
 }
@@ -1412,6 +1425,256 @@ static int frac_to_px(double f, int origin, int size)
         if (p < 0) p = 0;
     }
     return origin + p;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Background mode: window messages instead of input injection               */
+/*
+ * Nothing here touches the real pointer, the foreground window, or SendInput. Mouse
+ * messages are posted straight to the deepest child window at the point. Posted
+ * messages never pass through the low-level mouse hook, so they are never reported.
+ * All of this runs on the main thread only.
+ */
+
+static int bg_mode;         /* `bg 1` seen: the next seq runs in background mode */
+static HWND bg_recv;      /* receiver of the gesture in progress (until every button is up) */
+static int vp_valid;      /* virtual pointer set by an `m` in this seq */
+static POINT vp_pt;       /* virtual pointer, screen coordinates */
+static HWND vp_win;       /* window the virtual pointer was last aimed at */
+static long long bg_last_move_ms = -1000;
+/* Last button press, kept across seqs (a host double click is two gestures/seqs). */
+static struct {
+    HWND recv;
+    int button;
+    long long t;
+    POINT pt;
+} bg_last_down;
+
+static int bg_recv_active(void)
+{
+    return bg_recv != NULL;
+}
+
+/* WM_NCHITTEST without blocking on a hung target. HTNOWHERE on timeout. */
+static LRESULT bg_hittest(HWND h, POINT s)
+{
+    DWORD_PTR r = HTNOWHERE;
+    if (!SendMessageTimeoutW(h, WM_NCHITTEST, 0, MAKELPARAM((SHORT)s.x, (SHORT)s.y),
+                             SMTO_ABORTIFHUNG | SMTO_BLOCK, BG_HITTEST_TIMEOUT_MS, &r))
+        return HTNOWHERE;
+    return (LRESULT)r;
+}
+
+/*
+ * Deepest window under screen point s inside top's subtree, found by walking down:
+ * children front to back, skipping hidden, disabled and WS_EX_TRANSPARENT ones, honouring
+ * window regions, and letting each candidate answer HTTRANSPARENT to fall through.
+ * (WindowFromPoint would return whatever occludes top; ChildWindowFromPointEx returns
+ * static labels; RealChildWindowFromPoint returns disabled windows.) Returns 1 and the
+ * window only if the point is a client-area hit there, else 0 (title bar, borders,
+ * outside the window...): such a point must never receive button messages.
+ */
+static int bg_lookup(HWND top, POINT s, HWND *found)
+{
+    RECT wr;
+    if (!top || !IsWindow(top) || !GetWindowRect(top, &wr) || !PtInRect(&wr, s)) return 0;
+    HWND cur = top;
+    for (int depth = 0; depth < 64; depth++) {
+        RECT cr;
+        POINT a = {0, 0};
+        if (!GetClientRect(cur, &cr) || !ClientToScreen(cur, &a)) break;
+        OffsetRect(&cr, a.x, a.y);
+        if (!PtInRect(&cr, s)) break; /* children are clipped to the parent's client area */
+        HWND hit = NULL;
+        for (HWND ch = GetWindow(cur, GW_CHILD); ch; ch = GetWindow(ch, GW_HWNDNEXT)) {
+            LONG_PTR st = GetWindowLongPtrW(ch, GWL_STYLE), ex = GetWindowLongPtrW(ch, GWL_EXSTYLE);
+            if (!(st & WS_VISIBLE) || (st & WS_DISABLED) || (ex & WS_EX_TRANSPARENT)) continue;
+            RECT r;
+            if (!GetWindowRect(ch, &r) || !PtInRect(&r, s)) continue;
+            HRGN rg = CreateRectRgn(0, 0, 0, 0);
+            if (rg) {
+                int kind = GetWindowRgn(ch, rg);
+                int inside = kind == ERROR || (kind != NULLREGION && PtInRegion(rg, s.x - r.left, s.y - r.top));
+                DeleteObject(rg);
+                if (!inside) continue;
+            }
+            if (bg_hittest(ch, s) == HTTRANSPARENT) continue;
+            hit = ch;
+            break;
+        }
+        if (!hit) break;
+        cur = hit;
+    }
+    if (bg_hittest(cur, s) != HTCLIENT) return 0;
+    *found = cur;
+    return 1;
+}
+
+/* Windows that are not DPI aware (or only system aware) see virtualized coordinates in
+ * real input; scale the same way so a posted message matches what they expect. Falls
+ * back to 1 when the (Windows 10 / 8.1) APIs are missing. */
+static double bg_dpi_scale(HWND h)
+{
+    static int tried;
+    static UINT(WINAPI * get_win_dpi)(HWND);
+    static HRESULT(WINAPI * get_mon_dpi)(HMONITOR, int, UINT *, UINT *);
+    if (!tried) {
+        tried = 1;
+        HMODULE u = GetModuleHandleW(L"user32.dll");
+        if (u) get_win_dpi = (UINT(WINAPI *)(HWND))(void (*)(void))GetProcAddress(u, "GetDpiForWindow");
+        HMODULE sh = LoadLibraryW(L"shcore.dll");
+        if (sh)
+            get_mon_dpi = (HRESULT(WINAPI *)(HMONITOR, int, UINT *, UINT *))(void (*)(void))GetProcAddress(
+                sh, "GetDpiForMonitor");
+    }
+    if (!get_win_dpi || !get_mon_dpi) return 1.0;
+    UINT wd = get_win_dpi(h), dx = 0, dy = 0;
+    HMONITOR mon = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
+    if (!wd || !mon || FAILED(get_mon_dpi(mon, 0 /* MDT_EFFECTIVE_DPI */, &dx, &dy)) || !dx) return 1.0;
+    return (double)wd / (double)dx;
+}
+
+/* lParam for a client-area mouse message to h at screen point s. */
+static LPARAM bg_client_lp(HWND h, POINT s)
+{
+    POINT c = s;
+    ScreenToClient(h, &c);
+    double k = bg_dpi_scale(h);
+    if (k != 1.0) {
+        c.x = (LONG)floor(c.x * k + 0.5);
+        c.y = (LONG)floor(c.y * k + 0.5);
+    }
+    return MAKELPARAM((SHORT)c.x, (SHORT)c.y);
+}
+
+/* MK_* flags for the buttons this seq holds. */
+static WPARAM bg_keyflags(void)
+{
+    WPARAM f = 0;
+    if (held_btn[1]) f |= MK_LBUTTON;
+    if (held_btn[2]) f |= MK_MBUTTON;
+    if (held_btn[3]) f |= MK_RBUTTON;
+    if (held_btn[8]) f |= MK_XBUTTON1;
+    if (held_btn[9]) f |= MK_XBUTTON2;
+    return f;
+}
+
+static int bg_post_move(HWND h, POINT s)
+{
+    bg_last_move_ms = now_ms();
+    return PostMessageW(h, WM_MOUSEMOVE, bg_keyflags(), bg_client_lp(h, s)) != 0;
+}
+
+/* `m`: move the virtual pointer to screen point s of window w. Returns 0 if a click
+ * cannot be delivered there (skip mode). While a gesture is in progress the receiver is
+ * fixed (stand-in for mouse capture) and only gets throttled moves. */
+static int bg_m(HWND w, POINT s)
+{
+    vp_valid = 1;
+    vp_pt = s;
+    vp_win = w;
+    if (bg_recv) {
+        if (now_ms() - bg_last_move_ms < BG_MOVE_INTERVAL_MS) return 1;
+        return bg_post_move(bg_recv, s);
+    }
+    HWND c;
+    if (!bg_lookup(w, s, &c)) return 0;
+    return bg_post_move(c, s);
+}
+
+static int bg_msgs(int b, UINT *down, UINT *up, UINT *dbl)
+{
+    switch (b) {
+    case 1: *down = WM_LBUTTONDOWN; *up = WM_LBUTTONUP; *dbl = WM_LBUTTONDBLCLK; return 1;
+    case 2: *down = WM_MBUTTONDOWN; *up = WM_MBUTTONUP; *dbl = WM_MBUTTONDBLCLK; return 1;
+    case 3: *down = WM_RBUTTONDOWN; *up = WM_RBUTTONUP; *dbl = WM_RBUTTONDBLCLK; return 1;
+    case 8:
+    case 9: *down = WM_XBUTTONDOWN; *up = WM_XBUTTONUP; *dbl = WM_XBUTTONDBLCLK; return 1;
+    default: return 0;
+    }
+}
+
+static WPARAM bg_button_wp(int b, WPARAM flags)
+{
+    return b == 8 ? MAKEWPARAM(flags, XBUTTON1) : b == 9 ? MAKEWPARAM(flags, XBUTTON2) : flags;
+}
+
+static WPARAM bg_own_flag(int b)
+{
+    switch (b) {
+    case 1: return MK_LBUTTON;
+    case 2: return MK_MBUTTON;
+    case 3: return MK_RBUTTON;
+    case 8: return MK_XBUTTON1;
+    case 9: return MK_XBUTTON2;
+    default: return 0;
+    }
+}
+
+/* `d BTN`. Returns 0 for skip mode. */
+static int bg_down(int b)
+{
+    if (!vp_valid) {
+        diag("background press without a preceding m, ignored");
+        return 1;
+    }
+    UINT dn, up, dbl;
+    if (b >= 4 && b <= 7) {
+        HWND c;
+        if (!bg_lookup(vp_win, vp_pt, &c)) return 0;
+        int delta = (b == 4 || b == 7) ? WHEEL_DELTA : -WHEEL_DELTA;
+        /* Wheel messages carry SCREEN coordinates. */
+        return PostMessageW(c, b <= 5 ? WM_MOUSEWHEEL : WM_MOUSEHWHEEL, MAKEWPARAM(bg_keyflags(), (WORD)(short)delta),
+                            MAKELPARAM((SHORT)vp_pt.x, (SHORT)vp_pt.y)) != 0;
+    }
+    if (!bg_msgs(b, &dn, &up, &dbl)) {
+        diag("button %d cannot be delivered in background mode, ignored", b);
+        return 1;
+    }
+    if (held_btn[b]) return 1;
+    HWND c = bg_recv;
+    if (!c && !bg_lookup(vp_win, vp_pt, &c)) return 0;
+    if (!bg_post_move(c, vp_pt)) return 0;
+    /* Posted messages are not turned into double clicks by the system: do it here for
+     * classes that ask for them (CS_DBLCLKS). */
+    UINT msg = dn;
+    long long t = now_ms();
+    int dcx = GetSystemMetrics(SM_CXDOUBLECLK) / 2, dcy = GetSystemMetrics(SM_CYDOUBLECLK) / 2;
+    if (!bg_recv && bg_last_down.recv == c && bg_last_down.button == b &&
+        t - bg_last_down.t <= (long long)GetDoubleClickTime() && labs(vp_pt.x - bg_last_down.pt.x) <= dcx &&
+        labs(vp_pt.y - bg_last_down.pt.y) <= dcy && (GetClassLongPtrW(c, GCL_STYLE) & CS_DBLCLKS)) {
+        msg = dbl;
+        bg_last_down.recv = NULL; /* a third press starts over */
+    } else {
+        bg_last_down.recv = c;
+        bg_last_down.button = b;
+        bg_last_down.t = t;
+        bg_last_down.pt = vp_pt;
+    }
+    if (!PostMessageW(c, msg, bg_button_wp(b, bg_keyflags() | bg_own_flag(b)), bg_client_lp(c, vp_pt))) return 0;
+    held_btn[b] = 1;
+    bg_recv = c;
+    return 1;
+}
+
+/* `u BTN`: the release goes to the receiver of the press. Returns 0 if it was refused. */
+static int bg_up(int b)
+{
+    UINT dn, up, dbl;
+    if (b >= 4 && b <= 7) return 1; /* wheel: the matching u is a no-op */
+    if (!bg_msgs(b, &dn, &up, &dbl) || !held_btn[b]) return 1;
+    held_btn[b] = 0;
+    HWND c = bg_recv;
+    if (!any_btn_held()) bg_recv = NULL;
+    if (!c) return 1;
+    return PostMessageW(c, up, bg_button_wp(b, bg_keyflags()), bg_client_lp(c, vp_pt)) != 0;
+}
+
+static void bg_release_all(void)
+{
+    for (int i = 0; i < 256; i++)
+        if (held_btn[i]) bg_up(i);
+    bg_recv = NULL;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1587,6 +1850,7 @@ static void run_seq(char *args)
     timeBeginPeriod(1); /* 1 ms wait granularity for `s` sleeps and settle polls */
     EnterCriticalSection(&cs);
     seq_running = 1;
+    seq_bg = bg_mode;
     heartbeat = now_ms();
     scan_queued_abort_locked();
     LeaveCriticalSection(&cs);
@@ -1594,6 +1858,9 @@ static void run_seq(char *args)
     int skip = 0;
     HWND skipwin = NULL;
     int any_target = 0, any_ok = 0;
+    const int bg = bg_mode;
+    vp_valid = 0;
+    bg_recv = NULL;
 
     for (size_t i = 0; i < n; i++) {
         /* service the other threads between ops so `abort` is noticed promptly */
@@ -1612,6 +1879,23 @@ static void run_seq(char *args)
                 break;
             }
             skip = 0;
+            if (bg) {
+                /* No activation, no real pointer: only the virtual one moves. */
+                int ok = 1;
+                if (o->op == 'm') {
+                    Rect r;
+                    ok = content_rect(w, &r) &&
+                         bg_m(w, (POINT){frac_to_px(o->fx, r.x, r.w), frac_to_px(o->fy, r.y, r.h)});
+                }
+                if (!ok) {
+                    release_all();
+                    skip = 1;
+                    skipwin = w;
+                    break;
+                }
+                any_ok = 1;
+                break;
+            }
             if (o->op == 'f') {
                 if (!activate(w)) {
                     release_all();
@@ -1650,6 +1934,14 @@ static void run_seq(char *args)
         case 'd':
         case 'u':
             if (skip) break;
+            if (bg) {
+                if (!(o->op == 'd' ? bg_down((int)o->a) : bg_up((int)o->a))) {
+                    release_all();
+                    skip = 1;
+                    skipwin = vp_win;
+                }
+                break;
+            }
             if (!inject_button((int)o->a, o->op == 'd'))
                 diag("button %ld cannot be injected on Windows, ignored", o->a);
             break;
@@ -1659,6 +1951,7 @@ static void run_seq(char *args)
             break;
         case 'w':
             skip = 0;
+            if (bg) break;
             warp((int)o->a, (int)o->b);
             break;
         }
@@ -1669,6 +1962,7 @@ static void run_seq(char *args)
     free(ops);
     EnterCriticalSection(&cs);
     seq_running = 0;
+    seq_bg = 0;
     suppress_until = now_ms() + POST_SEQ_SUPPRESS_MS;
     LeaveCriticalSection(&cs);
     timeEndPeriod(1);
@@ -1691,6 +1985,11 @@ static void exec_line(char *line)
         pick_cancel();
     } else if (strncmp(t, "seq", 3) == 0 && (t[3] == ' ' || t[3] == '\t')) {
         run_seq(trim(t + 4));
+    } else if (strncmp(t, "bg", 2) == 0 && (t[2] == ' ' || t[2] == '\t' || t[2] == 0)) {
+        char *a = trim(t + 2);
+        if (strcmp(a, "0") == 0) bg_mode = 0;
+        else if (strcmp(a, "1") == 0) bg_mode = 1;
+        else emit_error("bad bg argument (expected 0 or 1)");
     } else if (strcmp(t, "abort") == 0) {
         /* no seq running: nothing to do */
     } else {

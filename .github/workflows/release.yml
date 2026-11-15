@@ -272,7 +272,7 @@ jobs:
         run: npm version "$VERSION" --no-git-tag-version
 
       - name: Get the app icons
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: icons
           path: build/
@@ -336,7 +336,7 @@ jobs:
           ref: ${{ inputs.dry_run && github.sha || needs.plan.outputs.tag }}
 
       - name: Get the packages
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: dist-*
           path: dist/

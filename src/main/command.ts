@@ -18,6 +18,8 @@ export const parseCommand = (u: unknown): IpcCommand | null => {
     case "startPick":
     case "cancelPick":
     case "clearGroup":
+    case "installUpdate":
+    case "openPermissionSettings":
     case "quit":
       return { c: o["c"] }
     case "setIncluded":

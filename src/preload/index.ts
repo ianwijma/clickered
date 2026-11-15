@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron"
-import { IPC, type AppState, type ClickeredApi, type IpcCommand } from "@shared/ipc"
+import { IPC, type AppState, type ClickeredApi, type IpcCommand, type UpdateState } from "@shared/ipc"
 
 const send = (cmd: IpcCommand): void => ipcRenderer.send(IPC.command, cmd)
 
@@ -19,6 +19,14 @@ const api: ClickeredApi = {
   setClickOffset: (px) => send({ c: "setClickOffset", px }),
   setClickDelay: (ms) => send({ c: "setClickDelay", ms }),
   setSize: (width, height) => send({ c: "setSize", width, height }),
+  getUpdate: () => ipcRenderer.invoke(IPC.getUpdate) as Promise<UpdateState>,
+  onUpdate: (listener) => {
+    const handler = (_e: unknown, update: UpdateState): void => listener(update)
+    ipcRenderer.on(IPC.update, handler)
+    return () => ipcRenderer.removeListener(IPC.update, handler)
+  },
+  installUpdate: () => send({ c: "installUpdate" }),
+  openPermissionSettings: () => send({ c: "openPermissionSettings" }),
   quit: () => send({ c: "quit" }),
 }
 

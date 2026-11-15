@@ -320,21 +320,41 @@ static void emit_buf(Buf *b)
     else wake_main();
 }
 
-static void emit_error(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-static void emit_error(const char *fmt, ...)
+/* `perm` (NULL for none): the OS permission this startup error waits for, sent as the
+ * message's "perm" field ("accessibility" / "input-monitoring", see docs/PROTOCOL.md). */
+static void emit_error_v(const char *perm, const char *fmt, va_list ap)
 {
     char msg[512];
-    va_list ap;
-    va_start(ap, fmt);
     vsnprintf(msg, sizeof msg, fmt, ap);
-    va_end(ap);
     Buf b = {0};
     b_puts(&b, "{\"t\":\"error\",\"msg\":");
     b_jstr(&b, msg, strlen(msg));
+    if (perm) {
+        b_puts(&b, ",\"perm\":");
+        b_jstr(&b, perm, strlen(perm));
+    }
     b_putc(&b, '}');
     emit_buf(&b);
     free(b.p);
     fprintf(stderr, "clickered-helper: %s\n", msg);
+}
+
+static void emit_error(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void emit_error(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    emit_error_v(NULL, fmt, ap);
+    va_end(ap);
+}
+
+static void emit_perm_error(const char *perm, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
+static void emit_perm_error(const char *perm, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    emit_error_v(perm, fmt, ap);
+    va_end(ap);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1967,9 +1987,10 @@ static void wait_for_permissions(void)
     if (!AXIsProcessTrusted()) {
         NSDictionary *opts = @{(__bridge NSString *)kAXTrustedCheckOptionPrompt : @YES};
         AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)opts);
-        emit_error("clickered needs the Accessibility permission to see and click windows. "
-                   "Open System Settings > Privacy & Security > Accessibility and turn on "
-                   "clickered (the app that started this helper); it continues automatically.");
+        emit_perm_error("accessibility",
+                        "clickered needs the Accessibility permission to see and click windows. "
+                        "Open System Settings > Privacy & Security > Accessibility and turn on "
+                        "clickered (the app that started this helper); it continues automatically.");
         while (!AXIsProcessTrusted()) wait_startup(1.0);
     }
     int warned = 0;
@@ -1977,9 +1998,10 @@ static void wait_for_permissions(void)
         if (!warned) {
             warned = 1;
             CGRequestListenEventAccess();
-            emit_error("clickered could not start listening to mouse input. Open System "
-                       "Settings > Privacy & Security > Input Monitoring (and Accessibility) and "
-                       "turn on clickered; it continues automatically.");
+            emit_perm_error("input-monitoring",
+                            "clickered could not start listening to mouse input. Open System "
+                            "Settings > Privacy & Security > Input Monitoring (and Accessibility) and "
+                            "turn on clickered; it continues automatically.");
         }
         wait_startup(1.0);
     }

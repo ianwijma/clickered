@@ -2,18 +2,23 @@
  * Electron main process: app lifecycle, the bar window, IPC and the global hotkey.
  * All replication logic lives in ./engine.
  */
+import { appendFile } from "node:fs/promises"
 import { join } from "node:path"
-import { app, BrowserWindow, globalShortcut, ipcMain, screen } from "electron"
+import { app, BrowserWindow, globalShortcut, ipcMain, screen, shell } from "electron"
 import { Effect } from "effect"
-import { IPC } from "@shared/ipc"
+import { IPC, type UpdateState } from "@shared/ipc"
 import { parseCommand } from "./command"
 import { ConfigStore, loadConfig, type BarPosition } from "./config"
-import { startEngine, type Engine } from "./engine"
+import { permissionSettingsUrl, startEngine, type Engine } from "./engine"
+import type { Updater } from "./update"
+import { startAppUpdater } from "./update-electron"
 
 const INITIAL_SIZE = { width: 420, height: 64 }
 const SIZE_LIMITS = { minW: 80, maxW: 1600, minH: 24, maxH: 1200 }
 /** Keep the bar click-through this long after a replay, so back-to-back replays don't flicker it. */
 const PASS_THROUGH_LINGER_MS = 300
+/** Longest a quit waits for a critical update step (the macOS bundle swap: two renames). */
+const CRITICAL_WAIT_MS = 60_000
 
 // Transparent windows on Linux/X11 need an ARGB visual.
 if (process.platform === "linux") app.commandLine.appendSwitch("enable-transparent-visuals")
@@ -57,6 +62,7 @@ function defaultPosition(size: { width: number; height: number }): BarPosition {
 function main(): void {
   let win: BrowserWindow | null = null
   let engine: Engine | null = null
+  let updater: Updater | null = null
   let config: ConfigStore | null = null
   let quitting = false
 
@@ -153,6 +159,7 @@ function main(): void {
     win !== null && !win.isDestroyed() && e.sender === win.webContents && e.senderFrame === win.webContents.mainFrame
 
   ipcMain.handle(IPC.getState, (e) => (fromBar(e) ? (engine?.getState() ?? null) : null))
+  ipcMain.handle(IPC.getUpdate, (e): UpdateState | null => (fromBar(e) ? (updater?.getState() ?? { status: "none" }) : null))
   ipcMain.on(IPC.command, (e, raw: unknown) => {
     if (!fromBar(e)) return
     const cmd = parseCommand(raw)
@@ -162,28 +169,62 @@ function main(): void {
         return setSize(cmd.width, cmd.height)
       case "quit":
         return app.quit()
+      case "installUpdate":
+        return updater?.install()
+      case "openPermissionSettings":
+        return openPermissionSettings()
       default:
         return engine?.command(cmd)
     }
   })
+
+  /**
+   * Test hook (unpackaged builds only, like the CLICKERED_UPDATE_* ones in update-core.ts):
+   * CLICKERED_OPEN_SETTINGS_LOG=<file> appends the settings URL to that file instead of
+   * opening it, on every platform, so the E2E suite can drive the permission chip.
+   */
+  const openSettingsLog = app.isPackaged ? null : process.env["CLICKERED_OPEN_SETTINGS_LOG"] || null
+
+  /** macOS: System Settings at the page of the permission the helper is waiting for. */
+  const openPermissionSettings = (): void => {
+    const perm = engine?.pendingPermission() ?? null
+    if (perm === null) return
+    const url = permissionSettingsUrl(perm)
+    if (openSettingsLog !== null) {
+      appendFile(openSettingsLog, url + "\n").catch((err: unknown) => {
+        console.warn(`[clickered] could not record the settings URL: ${String(err)}`)
+      })
+      return
+    }
+    if (process.platform !== "darwin") return
+    shell.openExternal(url).catch((err: unknown) => {
+      console.warn(`[clickered] could not open System Settings: ${String(err)}`)
+    })
+  }
 
   app.on("window-all-closed", () => app.quit())
 
   app.on("will-quit", (e) => {
     globalShortcut.unregisterAll()
     config?.flush()
-    if (engine && !quitting) {
+    // Stops update checks/downloads; a critical install step (the macOS bundle swap) is
+    // uninterruptible and finishes regardless, and the exit below waits for it.
+    updater?.shutdown()
+    if ((engine || updater) && !quitting) {
       quitting = true
       e.preventDefault()
-      const done = (): void => app.exit(0)
-      const timer = setTimeout(done, 2000)
-      engine.shutdown().then(
-        () => {
-          clearTimeout(timer)
-          done()
-        },
-        () => done(),
-      )
+      const bounded = (p: Promise<unknown>, ms: number): Promise<void> =>
+        new Promise((resolve) => {
+          const t = setTimeout(resolve, ms)
+          p.then(
+            () => (clearTimeout(t), resolve()),
+            () => (clearTimeout(t), resolve()),
+          )
+        })
+      void Promise.all([
+        engine ? bounded(engine.shutdown(), 2000) : Promise.resolve(),
+        updater ? bounded(updater.criticalDone(), CRITICAL_WAIT_MS) : Promise.resolve(),
+      ]).then(() => app.exit(0))
     }
   })
 
@@ -209,6 +250,18 @@ function main(): void {
         if (win && !win.isDestroyed()) win.webContents.send(IPC.state, s)
       },
       onReplay,
+    })
+
+    // Always checks GitHub for a newer release now and every 24 h (README.md, "Updates").
+    updater = startAppUpdater({
+      onState: (u) => {
+        if (win && !win.isDestroyed()) win.webContents.send(IPC.update, u)
+      },
+      isBusy: () => engine?.getState().busy ?? false,
+      exit: (relaunch) => {
+        if (relaunch) app.relaunch()
+        app.quit()
+      },
     })
 
     const hotkey = store.get().hotkey

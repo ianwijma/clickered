@@ -59,6 +59,42 @@ Platform limits worth knowing:
   replicated into; use borderless or windowed mode. Windows on another virtual
   desktop are skipped, and the bar stays on the desktop it was opened on.
 
+## Updates
+
+On every start, and once a day while it runs, Clickered asks GitHub for the latest
+release (`api.github.com/repos/ianwijma/clickered/releases/latest`). That is the only
+thing it contacts by itself, and the request carries no identifying data beyond your
+IP address and the app version (in the `User-Agent`). If the check fails (offline, rate limited), nothing is shown. When a
+newer stable release exists, the bar shows a small chip with an **Install** button;
+nothing is downloaded until you click it. A copy run from source, or not installed
+from a release package, never offers updates.
+
+**Install** downloads the file for your OS from the GitHub release (only from
+`github.com` and GitHub's download servers, over HTTPS), checks its size and its
+SHA-256 against both the release's `SHA256SUMS.txt` and the checksum GitHub
+reports for the file, and only then installs it:
+
+- **Linux:** asks for your password (`pkexec`) to run a small script that came with
+  the installed package, `/opt/Clickered/resources/clickered-install-update`. As root it
+  copies the .deb into a folder only root can write, checks the copy's SHA-256 again
+  (so nothing can swap the file while the password prompt is open), and installs it
+  with `apt-get install`. Then Clickered restarts.
+- **macOS:** replaces Clickered.app in place (it must be in a folder you can write to,
+  such as Applications) and restarts. If it cannot (for example when it runs from the
+  dmg), it opens the new dmg so you can drag it over. Because the builds are not
+  signed with a Developer ID, macOS treats the updated app as a new one and asks for
+  the **Accessibility** permission again: the bar shows a chip with **Open
+  Settings**; switch the old Clickered entry off and on (or remove it and add the
+  app again). The chip goes away by itself once the permission is granted.
+- **Windows:** runs the installer silently; Clickered closes and starts again.
+
+A failed install can be retried a few times, with growing pauses in between (each
+try may ask for your password); after five tries restart Clickered. An update never
+installs while a replay is running.
+
+Releases are verified against what was uploaded to GitHub, not against a signing
+key: someone in control of the GitHub repository could publish a bad update.
+
 ## Run from source
 
 Node.js 22.12+ and a C toolchain for the native helper:
@@ -108,6 +144,9 @@ container, so your real desktop is never touched:
 1. `native/test/run.py` — the native helper's protocol test (fake WM, physical vs XTEST input).
 2. `e2e/engine.e2e.test.ts` — real helper + engine: picking, click/drag replay, pause, pinned master, Escape.
 3. `e2e/app.e2e.test.ts` — the built Electron app driven through the bar UI with Playwright.
+4. `e2e/chip.e2e.test.ts` — the chip under the bar: in-app updates against a local fake release server (dry run,
+   nothing is installed), and the macOS permission chip with the fake helper. With `-e E2E_SHOTS=/shots -v
+   <dir>:/shots` it also saves a screenshot of every chip state in dark and light.
 
 The E2E suites refuse to run outside the container. Pass a filter through to vitest with
 `docker run --rm --init --shm-size=512m -e SKIP_NATIVE=1 clickered-e2e -t Escape` after a build.

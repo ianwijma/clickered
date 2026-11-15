@@ -52,7 +52,35 @@ export interface AppState {
   readonly hotkey: string
   /** True while a gesture is being replayed into the other windows. */
   readonly busy: boolean
+  /**
+   * "missing" while the helper is waiting for an OS permission the user has to grant
+   * (macOS Accessibility); "ok" otherwise, and always "ok" on Linux and Windows. The bar
+   * shows a chip with a button that opens the right settings page (`openPermissionSettings`).
+   */
+  readonly permission: "ok" | "missing"
 }
+
+/** Why an update could not be installed. */
+export type UpdateFailure = "checksum" | "download" | "install"
+
+/**
+ * In-app update state, pushed on `IPC.update` separately from `AppState`. Main checks for a
+ * newer release on startup; the bar shows a chip under the pill for every status but "none".
+ */
+export type UpdateState =
+  /** Nothing to show: not checked yet, up to date, the check failed, or this copy of the
+   *  app cannot update itself (dev run, not installed from a release package). */
+  | { readonly status: "none" }
+  /** A newer release exists; `installUpdate` starts it. `version` has no leading "v". */
+  | { readonly status: "available"; readonly version: string }
+  /** `progress` is the downloaded fraction, 0..1. */
+  | { readonly status: "downloading"; readonly version: string; readonly progress: number }
+  /** The download is complete and its SHA-256 checksum is being checked. */
+  | { readonly status: "verifying"; readonly version: string }
+  /** The verified package is being installed; the app restarts by itself afterwards. */
+  | { readonly status: "installing"; readonly version: string }
+  /** `installUpdate` retries from the start. `message` is a short technical detail (tooltip). */
+  | { readonly status: "failed"; readonly version: string; readonly reason: UpdateFailure; readonly message: string }
 
 /** Exposed on `window.clickered` by the preload script. */
 export interface ClickeredApi {
@@ -76,6 +104,16 @@ export interface ClickeredApi {
   setClickDelay(ms: number): void
   /** Renderer reports the pixel size its content needs; main resizes the frameless window. */
   setSize(width: number, height: number): void
+  /** Current update snapshot (call once on startup). */
+  getUpdate(): Promise<UpdateState>
+  /** Subscribe to update snapshots. Returns an unsubscribe function. */
+  onUpdate(listener: (update: UpdateState) => void): () => void
+  /** Download, verify and install the available update (also the "Retry" after a failure).
+   *  Ignored unless the status is "available" or "failed". */
+  installUpdate(): void
+  /** Open the OS settings page where the missing permission is granted (macOS: Privacy &
+   *  Security > Accessibility). Ignored when `permission` is "ok". */
+  openPermissionSettings(): void
   quit(): void
 }
 
@@ -83,6 +121,8 @@ export const IPC = {
   getState: "clickered:get-state",
   state: "clickered:state",
   command: "clickered:command",
+  getUpdate: "clickered:get-update",
+  update: "clickered:update",
 } as const
 
 /** Everything except getState/onState travels as one of these over `IPC.command`. */
@@ -96,4 +136,6 @@ export type IpcCommand =
   | { readonly c: "setClickOffset"; readonly px: number }
   | { readonly c: "setClickDelay"; readonly ms: number }
   | { readonly c: "setSize"; readonly width: number; readonly height: number }
+  | { readonly c: "installUpdate" }
+  | { readonly c: "openPermissionSettings" }
   | { readonly c: "quit" }

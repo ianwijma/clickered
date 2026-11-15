@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest"
 import type { HelperWindow } from "@shared/protocol"
-import { applyWindows, groupWindows, isSource, targetsFor, toAppState, type Model } from "./engine"
+import {
+  applyWindows,
+  groupWindows,
+  isSource,
+  permissionOf,
+  permissionSettingsUrl,
+  targetsFor,
+  toAppState,
+  type Model,
+} from "./engine"
 
 const win = (id: number, x: number, y = 0, mapped = true): HelperWindow => ({
   id,
@@ -18,6 +27,7 @@ const model = (patch: Partial<Model> = {}): Model => ({
   enabled: true,
   helper: "ready",
   helperError: null,
+  permission: null,
   picking: false,
   members: new Set([1, 2, 3]),
   allWindows: [win(3, 200), win(1, 0, 50), win(2, 0, 10), win(9, 50)],
@@ -97,5 +107,32 @@ describe("toAppState", () => {
   it("has no group without members", () => {
     const s = toAppState(model({ members: new Set() }))
     expect([s.groupClass, s.groupLabel, s.windows]).toEqual([null, null, []])
+  })
+})
+
+describe("permission", () => {
+  it("is missing only while the helper waits for a permission before ready", () => {
+    expect(toAppState(model({ helper: "starting", permission: "accessibility" })).permission).toBe("missing")
+    expect(toAppState(model({ helper: "starting", permission: "input-monitoring" })).permission).toBe("missing")
+    expect(toAppState(model({ helper: "starting", permission: null })).permission).toBe("ok")
+    expect(toAppState(model({ helper: "ready", permission: "accessibility" })).permission).toBe("ok")
+    expect(toAppState(model({ helper: "error", permission: "accessibility" })).permission).toBe("ok")
+  })
+
+  it("only trusts known perm values", () => {
+    expect(permissionOf({ t: "error", msg: "x", perm: "accessibility" })).toBe("accessibility")
+    expect(permissionOf({ t: "error", msg: "x", perm: "input-monitoring" })).toBe("input-monitoring")
+    expect(permissionOf({ t: "error", msg: "needs the Accessibility permission" })).toBeNull()
+    expect(permissionOf({ t: "error", msg: "x", perm: "camera" } as never)).toBeNull()
+    expect(permissionOf({ t: "error", msg: "x", perm: 1 } as never)).toBeNull()
+  })
+
+  it("maps each permission to its System Settings page", () => {
+    expect(permissionSettingsUrl("accessibility")).toBe(
+      "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+    )
+    expect(permissionSettingsUrl("input-monitoring")).toBe(
+      "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent",
+    )
   })
 })

@@ -4,11 +4,14 @@
  * so it is never part of a production build.
  *
  *   ?state=empty|picking|waiting|live|paused|busy|partial|error|starting|permission
+ *   ?update=available|downloading|verifying|installing|failed-checksum|failed-download|failed-install
+ *                   the update chip; "Install"/"Retry" plays the whole sequence on timers
+ *                   (state=permission: "Open Settings" grants the permission after 3 s)
  *   ?cycle          step through all states every 2.5 s
  *   ?expanded       open the panel
  *   ?plain          no fake game backdrop
  */
-import type { AppState, ClickeredApi, GroupWindow } from "@shared/ipc"
+import type { AppState, ClickeredApi, GroupWindow, UpdateFailure, UpdateState } from "@shared/ipc"
 
 const windows = (n: number, overrides: Partial<Record<number, Partial<GroupWindow>>> = {}): GroupWindow[] =>
   Array.from({ length: n }, (_, i) => ({
@@ -34,6 +37,7 @@ const base: AppState = {
   clickDelay: 0,
   hotkey: "Control+`",
   busy: false,
+  permission: "ok",
 }
 
 const STATES: Record<string, AppState> = {
@@ -46,6 +50,7 @@ const STATES: Record<string, AppState> = {
     groupClass: null,
     groupLabel: null,
     windows: [],
+    permission: "missing",
   },
   empty: { ...base, groupClass: null, groupLabel: null, windows: [] },
   picking: { ...base, groupClass: null, groupLabel: null, windows: [], picking: true },
@@ -62,6 +67,29 @@ const STATES: Record<string, AppState> = {
     clickDelay: 200,
   },
   error: { ...base, helper: "error", helperError: "XInput2 not available on display :1 (XIQueryVersion failed)" },
+}
+
+const VERSION = "0.3.0"
+
+function updateFromParam(param: string | null): UpdateState {
+  switch (param) {
+    case "available":
+      return { status: "available", version: VERSION }
+    case "downloading":
+      return { status: "downloading", version: VERSION, progress: 0.42 }
+    case "verifying":
+      return { status: "verifying", version: VERSION }
+    case "installing":
+      return { status: "installing", version: VERSION }
+    case "failed-checksum":
+    case "failed-download":
+    case "failed-install": {
+      const reason = param.slice("failed-".length) as UpdateFailure
+      return { status: "failed", version: VERSION, reason, message: `mock ${reason} failure` }
+    }
+    default:
+      return { status: "none" }
+  }
 }
 
 export function installMock(): ClickeredApi {
@@ -83,6 +111,32 @@ export function installMock(): ClickeredApi {
       i = (i + 1) % names.length
       set(STATES[names[i] ?? "live"] ?? base)
     }, 2500)
+  }
+
+  let update = updateFromParam(params.get("update"))
+  const updateListeners = new Set<(u: UpdateState) => void>()
+  const setUpdate = (u: UpdateState): void => {
+    update = u
+    for (const l of updateListeners) l(u)
+  }
+  let installTimer: ReturnType<typeof setTimeout> | undefined
+  /** download 3.2 s -> verify 1.5 s -> install 2.6 s -> back to "available" (a real app restarts). */
+  const playInstall = (): void => {
+    const t0 = Date.now()
+    const tick = (): void => {
+      const f = Math.min(1, (Date.now() - t0) / 3200)
+      setUpdate({ status: "downloading", version: VERSION, progress: f })
+      if (f < 1) {
+        installTimer = setTimeout(tick, 100)
+        return
+      }
+      setUpdate({ status: "verifying", version: VERSION })
+      installTimer = setTimeout(() => {
+        setUpdate({ status: "installing", version: VERSION })
+        installTimer = setTimeout(() => setUpdate({ status: "available", version: VERSION }), 2600)
+      }, 1500)
+    }
+    tick()
   }
 
   // Draw the size the renderer reports, so sizing can be checked visually.
@@ -113,6 +167,21 @@ export function installMock(): ClickeredApi {
       outline.style.width = `${width}px`
       outline.style.height = `${height}px`
       document.title = `Clickered ${width}x${height}`
+    },
+    getUpdate: async () => update,
+    onUpdate: (l) => {
+      updateListeners.add(l)
+      return () => updateListeners.delete(l)
+    },
+    installUpdate: () => {
+      if (update.status !== "available" && update.status !== "failed") return
+      clearTimeout(installTimer)
+      playInstall()
+    },
+    openPermissionSettings: () => {
+      if (current.permission !== "missing") return
+      console.info("[mock] open settings; granting in 3 s")
+      setTimeout(() => set({ permission: "ok", helper: "ready", helperError: null }), 3000)
     },
     quit: () => console.info("[mock] quit"),
   }

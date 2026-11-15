@@ -6,7 +6,13 @@
  */
 import { Cause, Duration, Effect, Queue, Scope, Stream, SubscriptionRef, Exit } from "effect"
 import type { AppState, GroupWindow, IpcCommand } from "@shared/ipc"
-import { PROTOCOL_VERSION, type HelperMessage, type HelperWindow, type WindowId } from "@shared/protocol"
+import {
+  PROTOCOL_VERSION,
+  type HelperMessage,
+  type HelperPermission,
+  type HelperWindow,
+  type WindowId,
+} from "@shared/protocol"
 import { timingOf, type ConfigStore } from "./config"
 import { superviseHelper, type Helper, type HelperSpawnOptions } from "./helper"
 import {
@@ -28,6 +34,8 @@ export interface Model {
   readonly enabled: boolean
   readonly helper: AppState["helper"]
   readonly helperError: string | null
+  /** The OS permission the helper is waiting for (an `error` with `perm` before `ready`). */
+  readonly permission: HelperPermission | null
   readonly picking: boolean
   /** The group: windows the user picked one by one. Ids vanish when their window closes. */
   readonly members: ReadonlySet<WindowId>
@@ -102,7 +110,17 @@ export const toAppState = (m: Model): AppState => ({
   clickDelay: m.clickDelay,
   hotkey: m.hotkey,
   busy: m.busy,
+  permission: m.helper === "starting" && m.permission !== null ? "missing" : "ok",
 })
+
+const PERMISSIONS: ReadonlySet<string> = new Set<HelperPermission>(["accessibility", "input-monitoring"])
+/** The `perm` of a helper `error`, if it is one this host knows (the field is untrusted input). */
+export const permissionOf = (msg: Extract<HelperMessage, { t: "error" }>): HelperPermission | null =>
+  typeof msg.perm === "string" && PERMISSIONS.has(msg.perm) ? msg.perm : null
+
+/** The macOS System Settings page where `perm` is granted. */
+export const permissionSettingsUrl = (perm: HelperPermission): string =>
+  `x-apple.systempreferences:com.apple.preference.security?${perm === "accessibility" ? "Privacy_Accessibility" : "Privacy_ListenEvent"}`
 
 /** Apply a new client list: prune exclusions, fix up the master. */
 export const applyWindows = (m: Model, list: ReadonlyArray<HelperWindow>): Model => {
@@ -140,6 +158,8 @@ export interface EngineOptions {
 
 export interface Engine {
   getState(): AppState
+  /** The permission the helper is waiting for, or null (also null once it is `ready`). */
+  pendingPermission(): HelperPermission | null
   command(cmd: IpcCommand): void
   /** Hotkey: flip `enabled`. */
   toggleEnabled(): void
@@ -165,6 +185,7 @@ export const startEngine = (opts: EngineOptions): Engine => {
       enabled: opts.enabledOnStart ?? true,
       helper: "starting",
       helperError: null,
+      permission: null,
       picking: false,
       members: new Set(opts.initialMembers ?? []),
       allWindows: [],
@@ -366,7 +387,7 @@ export const startEngine = (opts: EngineOptions): Engine => {
             yield* log(`helper ready (protocol v${msg.version})`)
             if (msg.version !== PROTOCOL_VERSION)
               yield* log(`warning: helper speaks protocol v${msg.version}, expected v${PROTOCOL_VERSION}; rebuild it`)
-            yield* update((s) => ({ ...s, helper: "ready", helperError: null }))
+            yield* update((s) => ({ ...s, helper: "ready", helperError: null, permission: null }))
           })
         case "windows":
           return Effect.gen(function* () {
@@ -411,8 +432,11 @@ export const startEngine = (opts: EngineOptions): Engine => {
             yield* log(`helper error: ${msg.msg}`)
             // Before `ready` an error is something the user has to fix while the helper
             // waits (e.g. the macOS Accessibility permission): show it until `ready`
-            // clears it. Later errors (a rejected command) are only logged.
-            if (get().helper === "starting") yield* update((s) => ({ ...s, helperError: msg.msg }))
+            // clears it. One that names a `perm` also makes `permission` "missing" (the
+            // bar's "Open Settings" chip). Later errors (a rejected command) are only logged.
+            if (get().helper !== "starting") return
+            const perm = permissionOf(msg)
+            yield* update((s) => ({ ...s, helperError: msg.msg, permission: perm ?? s.permission }))
           })
       }
     }
@@ -432,7 +456,7 @@ export const startEngine = (opts: EngineOptions): Engine => {
         Effect.gen(function* () {
           helper = h
           yield* log(`helper started (pid ${h.pid ?? "?"})`)
-          yield* update((s) => ({ ...s, helper: "starting", helperError: null }))
+          yield* update((s) => ({ ...s, helper: "starting", helperError: null, permission: null }))
           yield* Effect.addFinalizer(() => resetTransient)
           yield* Effect.forever(Queue.take(h.messages).pipe(Effect.flatMap(onMessage))).pipe(Effect.forkScoped)
         }),
@@ -443,6 +467,7 @@ export const startEngine = (opts: EngineOptions): Engine => {
           yield* update((s) => ({
             ...s,
             helper: "error",
+            permission: null,
             helperError: final ? `${reason} — gave up restarting` : `${reason} — restarting…`,
           }))
         }),
@@ -519,7 +544,9 @@ export const startEngine = (opts: EngineOptions): Engine => {
           })
         case "setSize":
         case "quit":
-          return Effect.void // window concerns, handled by index.ts
+        case "installUpdate":
+        case "openPermissionSettings":
+          return Effect.void // handled by index.ts
       }
     }
 
@@ -540,6 +567,10 @@ export const startEngine = (opts: EngineOptions): Engine => {
   let stopped: Promise<void> | null = null
   return {
     getState: () => toAppState(inner.get()),
+    pendingPermission: () => {
+      const m = inner.get()
+      return m.helper === "starting" ? m.permission : null
+    },
     command: (cmd) => run(inner.command(cmd)),
     toggleEnabled: () => run(inner.toggle),
     shutdown: () => (stopped ??= Effect.runPromise(Scope.close(scope, Exit.void))),

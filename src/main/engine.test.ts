@@ -334,6 +334,45 @@ describe("engine (fake helper)", () => {
     await waitFor(() => states.at(-1)?.helper === "ready" && states.at(-1)?.helperError === null)
   })
 
+  it("reports a missing permission from the error's perm, and clears it on ready", async () => {
+    const msg = "clickered needs the Accessibility permission"
+    const { engine, states } = setup({
+      env: { FAKE_STARTUP_ERROR: msg, FAKE_STARTUP_PERM: "accessibility", FAKE_READY_DELAY: "300" },
+    })
+    await waitFor(() => states.some((s) => s.permission === "missing"))
+    const waiting = states.find((s) => s.permission === "missing")!
+    expect([waiting.helper, waiting.helperError]).toEqual(["starting", msg])
+    expect(engine.pendingPermission()).toBe("accessibility")
+    await waitFor(() => engine.getState().helper === "ready")
+    expect(engine.getState().permission).toBe("ok")
+    expect(engine.pendingPermission()).toBeNull()
+    await waitFor(() => states.at(-1)?.helper === "ready" && states.at(-1)?.permission === "ok")
+  })
+
+  it("does not derive a permission from the error text alone", async () => {
+    const msg = "Clickered needs the Accessibility permission (System Settings > Privacy & Security > Accessibility)"
+    const { engine, states } = setup({ env: { FAKE_STARTUP_ERROR: msg, FAKE_READY_DELAY: "300" } })
+    await waitFor(() => states.some((s) => s.helperError === msg))
+    expect(states.every((s) => s.permission === "ok")).toBe(true)
+    expect(engine.pendingPermission()).toBeNull()
+  })
+
+  it("ignores an unknown perm value", async () => {
+    const { engine, states } = setup({
+      env: { FAKE_STARTUP_ERROR: "x", FAKE_STARTUP_PERM: "camera", FAKE_READY_DELAY: "300" },
+    })
+    await waitFor(() => states.some((s) => s.helperError === "x"))
+    expect(engine.getState().permission).toBe("ok")
+  })
+
+  it("permission is ok when the helper is missing", async () => {
+    const store = new ConfigStore(join(mkdtempSync(join(tmpdir(), "clickered-cfg-")), "c.json"), DEFAULT_CONFIG)
+    const engine = startEngine({ config: store, helper: { command: "/nonexistent/helper" }, onState: () => {} })
+    engines.push(engine)
+    await waitFor(() => engine.getState().helper === "error")
+    expect(engine.getState().permission).toBe("ok")
+  })
+
   it("only logs an error that arrives after ready", async () => {
     const { engine } = setup({ events: [{ t: "error", msg: "unknown command: bogus" }] })
     await waitFor(() => engine.getState().helper === "ready")

@@ -38,7 +38,7 @@ top-level child of root under the pointer; the client window is the
 | `{"t":"esc","time":MS}` | Panic key: a physical Escape press (auto-repeat ignored). Always sent, also during a `seq`. If a `seq` is running it is aborted exactly as by `abort`. No other key is ever reported. |
 | `{"t":"picked","win":ID}` | Result of `pick`. 0 = cancelled. |
 | `{"t":"done","id":N,"ok":BOOL}` | A `seq` finished (`ok:false` if aborted or every target was skipped). |
-| `{"t":"error","msg":"..."}` | Non-fatal problem (bad command, X error). |
+| `{"t":"error","msg":"..."}` | Non-fatal problem (bad command, X error). Optional `"perm"`: only on an `error` sent before `ready` while the helper waits for an OS permission, naming it: `"accessibility"` or `"input-monitoring"` (macOS only; see Platforms, Startup). Hosts ignore unknown values. |
 
 **Input source filtering.** Raw events are selected for `XIAllMasterDevices` on
 the root window (`XI_RawButtonPress/Release`, `XI_RawMotion`,
@@ -135,8 +135,10 @@ the same everywhere. What differs:
   Spaces/desktops.
 - **Startup.** The macOS helper needs the Accessibility (and maybe Input Monitoring)
   permission. Without it, it sends `error` lines with instructions **before** `ready`
-  and waits, re-checking about once a second, for as long as it takes. The host
-  therefore has no startup timeout and shows such an `error` in the bar until `ready`.
+  and waits, re-checking about once a second, for as long as it takes. Those `error`s
+  carry `"perm":"accessibility"` / `"perm":"input-monitoring"`. The host therefore has
+  no startup timeout; it shows such an `error` in the bar until `ready`, and a `perm`
+  makes it offer to open that System Settings page.
 - **Not reachable.** Windows: windows of elevated processes (UIPI), exclusive-fullscreen
   games, the secure desktop. macOS: Secure Input fields and apps that read raw HID.
   Some games ignore injected input on every OS.
@@ -147,6 +149,9 @@ the same everywhere. What differs:
   change is sent right after the `seq`.
 
 ## Changes
+
+- **Version 2, addition**: the optional `perm` field of `error` (macOS startup
+  permissions). Older hosts ignore it, so the version number did not change.
 
 - **Version 2**: keyboard replication was removed — the `keys` command, the `key`
   message and the `kd`/`ku` seq ops no longer exist (they are rejected as unknown).

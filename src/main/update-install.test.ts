@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { join, posix, resolve } from "node:path"
 import { Cause, Effect, Exit } from "effect"
 import { describe, expect, it } from "vitest"
 import type { AfterInstall, ChecksumError, InstallError, InstallRequest } from "./update"
@@ -61,7 +61,7 @@ const success = (exit: Exit.Exit<AfterInstall, Err>): AfterInstall | string =>
   Exit.isSuccess(exit) ? exit.value : `failed: ${Cause.pretty(exit.cause)}`
 
 const SHA = "e".repeat(64)
-const req = (dir: string, file = join(dir, "clickered-0.3.0-amd64.deb"), version = "0.3.0"): InstallRequest => ({
+const req = (dir: string, file = posix.join(dir, "clickered-0.3.0-amd64.deb"), version = "0.3.0"): InstallRequest => ({
   file,
   sha256: SHA,
   version,

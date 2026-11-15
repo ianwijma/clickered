@@ -231,9 +231,12 @@ describe("install", () => {
     expect(req.version).toBe(VERSION)
     expect(req.file).toBe(join(req.dir, DEB))
     expect(req.dir.startsWith(root)).toBe(true)
-    expect(statSync(root).mode & 0o777).toBe(0o700)
-    expect(statSync(req.dir).mode & 0o777).toBe(0o700)
-    expect(statSync(req.file).mode & 0o777).toBe(0o600)
+    if (process.platform !== "win32") {
+      // Node ignores POSIX modes on Windows.
+      expect(statSync(root).mode & 0o777).toBe(0o700)
+      expect(statSync(req.dir).mode & 0o777).toBe(0o700)
+      expect(statSync(req.file).mode & 0o777).toBe(0o600)
+    }
     expect(after).toEqual(["relaunch"])
   })
 

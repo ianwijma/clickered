@@ -32,7 +32,7 @@ import { execFile, spawn } from "node:child_process"
 import { randomBytes } from "node:crypto"
 import { constants as fsc } from "node:fs"
 import { access, appendFile, lstat, mkdir, readdir, realpath, rename, rm, stat } from "node:fs/promises"
-import { basename, dirname, join } from "node:path"
+import { basename, dirname, join, posix, win32 } from "node:path"
 import { Effect } from "effect"
 import { BUNDLE_ID, PACKAGE_NAME, PRODUCT_NAME } from "./update-core"
 import { ChecksumError, InstallError, type AfterInstall, type Eligibility, type InstallRequest } from "./update"
@@ -179,9 +179,10 @@ export const SCRIPT_EXIT = { usage: 64, checksum: 65, missingTool: 66, copy: 67 
 
 const ancestors = (p: string): string[] => {
   const out: string[] = []
-  for (let d = dirname(p); ; d = dirname(d)) {
+  // Linux-only: always POSIX, whatever the host (tests run this on Windows too).
+  for (let d = posix.dirname(p); ; d = posix.dirname(d)) {
     out.push(d)
-    if (d === dirname(d)) return out
+    if (d === posix.dirname(d)) return out
   }
 }
 
@@ -316,8 +317,8 @@ export const NSIS_ARGS = ["--updated", "/S", "--force-run"] as const
 /** An NSIS-installed copy: its uninstaller is next to the exe; not a portable or unpacked build. */
 export const windowsEligibility = async (execPath: string, env: NodeJS.ProcessEnv, fs: InstallFs): Promise<Eligibility> => {
   if (env["PORTABLE_EXECUTABLE_DIR"]) return { ok: false, why: "portable build" }
-  const dir = dirname(execPath)
-  if (!(await fs.exists(join(dir, WIN_UNINSTALLER)))) return { ok: false, why: `no ${WIN_UNINSTALLER} in ${dir}` }
+  const dir = win32.dirname(execPath)
+  if (!(await fs.exists(win32.join(dir, WIN_UNINSTALLER)))) return { ok: false, why: `no ${WIN_UNINSTALLER} in ${dir}` }
   return { ok: true }
 }
 

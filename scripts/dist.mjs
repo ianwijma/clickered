@@ -32,6 +32,18 @@ if (!platform) {
 const overrides = {}
 const has = (...names) => names.some((n) => (process.env[n] ?? "").trim() !== "")
 
+// CI passes every signing secret, set or not, so an unset one arrives as "". To
+// electron-builder an empty CSC_LINK is still "a certificate": it resolves "" to the
+// project directory and fails with "<dir> not a file". Drop the empty ones so
+// "empty" really means "not set".
+const SIGNING_ENV = [
+  "CSC_LINK", "CSC_KEY_PASSWORD", "CSC_NAME",
+  "WIN_CSC_LINK", "WIN_CSC_KEY_PASSWORD",
+  "APPLE_ID", "APPLE_APP_SPECIFIC_PASSWORD", "APPLE_TEAM_ID",
+  "APPLE_API_KEY", "APPLE_API_KEY_ID", "APPLE_API_ISSUER",
+]
+for (const n of SIGNING_ENV) if (!has(n)) delete process.env[n]
+
 if (process.platform === "darwin" && !has("CSC_LINK", "CSC_NAME")) {
   console.log("dist: no Developer ID certificate (CSC_LINK / CSC_NAME): ad-hoc signing, no notarization.")
   overrides.mac = {

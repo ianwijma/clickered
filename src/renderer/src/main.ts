@@ -5,7 +5,7 @@ import {
   type AppState,
   type ClickeredApi,
   type GroupWindow,
-  type UpdateState,
+  type UpdateSnapshot,
 } from "@shared/ipc"
 import type { WindowId } from "@shared/protocol"
 import {
@@ -96,7 +96,7 @@ const ICON_BTN =
 
 function start(api: ClickeredApi): void {
   let state: AppState | null = null
-  let update: UpdateState = { status: "none" }
+  let update: UpdateSnapshot = { status: "none", prereleases: false }
   let expanded = import.meta.env.DEV && new URLSearchParams(location.search).has("expanded")
 
   const app = document.getElementById("app") ?? document.body
@@ -215,12 +215,33 @@ function start(api: ClickeredApi): void {
   const BTN_NEUTRAL = `${CHIP_BTN} bg-zinc-900/[.07] text-zinc-700 hover:bg-zinc-900/[.12] active:bg-zinc-900/[.16] dark:bg-white/10 dark:text-zinc-300 dark:hover:bg-white/15 dark:active:bg-white/20`
   const BTN_SKY = `${CHIP_BTN} bg-sky-600 text-white hover:bg-sky-500 active:bg-sky-700 dark:bg-sky-500 dark:text-sky-950 dark:hover:bg-sky-400`
 
-  // Update available / failed (same layout: dot, text, button)
+  // Update available / failed (same layout: dot, text, [What's new], Skip, Install/Retry).
+  // "What's new" is only shown while available. It is a button styled as a link: the renderer
+  // has no URL (and a strict CSP); main opens the release page.
   const updDot = el("span", "size-2 shrink-0 rounded-full bg-emerald-500")
   const updText = el("span", "min-w-0 flex-1")
+  const notesLabel = el("span", "", "What's new")
+  const notesBtn = button(
+    "inline-flex h-[22px] shrink-0 items-center gap-0.5 rounded text-zinc-500 hover:text-zinc-900 hover:underline hover:underline-offset-2 dark:text-zinc-400 dark:hover:text-zinc-100",
+    "",
+    notesLabel,
+    icon("external", "size-3"),
+  )
+  const skipBtn = button(
+    "h-[22px] shrink-0 rounded-full px-2 text-xs font-semibold whitespace-nowrap text-zinc-500 hover:bg-zinc-900/[.07] hover:text-zinc-900 active:bg-zinc-900/[.12] dark:text-zinc-400 dark:hover:bg-white/10 dark:hover:text-zinc-100 dark:active:bg-white/15",
+    "",
+    "Skip",
+  )
   const updBtn = button(BTN_GO, "Install")
   updBtn.append("Install")
-  const layerUpdate = el("div", `${LAYER} w-max pr-1 pl-3`, updDot, updText, updBtn)
+  const layerUpdate = el(
+    "div",
+    `${LAYER} w-max pr-1 pl-3`,
+    updDot,
+    updText,
+    notesBtn,
+    el("div", "flex shrink-0 gap-0.5", skipBtn, updBtn),
+  )
 
   // Update in progress
   const workTitle = el("div", "truncate text-[13px] font-semibold leading-[1.3]")
@@ -351,6 +372,19 @@ function start(api: ClickeredApi): void {
     "Quit",
   )
 
+  // Pre-release updates switch, and the "skipped" line under it.
+  const preSwitch = smallSwitch("Pre-release updates")
+  const preName = el("span", "flex-1", "Pre-release updates")
+  preName.title = "Also offer release candidates and betas. Off: only full releases."
+  const preRow = el("div", "flex h-9 items-center gap-2 px-2", preName, preSwitch)
+  const skippedText = el("span", "flex-1")
+  const unskipBtn = button(
+    "-mr-1.5 h-[22px] shrink-0 rounded-md px-1.5 text-xs font-medium text-zinc-500 hover:bg-zinc-900/[.07] hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/10 dark:hover:text-zinc-100",
+    "",
+    "Show again",
+  )
+  const skippedRow = el("div", `mt-0.5 flex h-[26px] items-center gap-2 px-2 text-xs ${MUTED}`, skippedText, unskipBtn)
+
   const divider = (): HTMLElement => el("div", "mx-2 my-1 h-px bg-zinc-900/10 dark:bg-white/10")
   const listSection = el("div", "", masterLine, list, listEmpty)
   const listDivider = divider()
@@ -364,6 +398,9 @@ function start(api: ClickeredApi): void {
     listDivider,
     offset.row,
     delay.row,
+    divider(),
+    preRow,
+    skippedRow,
     divider(),
     el("div", "flex items-center gap-0.5", hotkeyHint, forgetBtn, quitBtn),
   )
@@ -521,10 +558,21 @@ function start(api: ClickeredApi): void {
           updBtn.textContent = label
           updBtn.className = failed ? BTN_NEUTRAL : BTN_GO
         }
-        const tip = failed ? view.message : null
-        setAttr(layerUpdate, "title", tip)
+        if (failed) setAttr(layerUpdate, "title", view.message)
         setAttr(updBtn, "title", failed ? "Download and install the update again" : "Download and install the update")
         setAttr(updBtn, "aria-label", failed ? "Retry the update" : "Install the update")
+        // The width is measured below, so these must be settled first.
+        show(notesBtn, !failed)
+        show(notesLabel, true)
+        const v = view.version
+        setAttr(skipBtn, "title", `Skip ${v}: no update notice until a newer version is released`)
+        setAttr(skipBtn, "aria-label", `Skip ${v}`)
+        if (view.kind === "update-available") {
+          setAttr(notesBtn, "title", `Open the ${v} release notes on GitHub`)
+          setAttr(notesBtn, "aria-label", `What's new in ${v}`)
+          updDot.className = `size-2 shrink-0 rounded-full ${view.prerelease ? "bg-amber-500 dark:bg-amber-400" : "bg-emerald-500"}`
+          setAttr(layerUpdate, "title", view.prerelease ? "Pre-release version" : null)
+        }
         break
       }
       case "permission-missing":
@@ -538,6 +586,9 @@ function start(api: ClickeredApi): void {
         layer = layerOk
     }
     setLayers(layer)
+    // A long version ("1.10.0-rc.1") can make the chip wider than the bar at its narrowest:
+    // the link then keeps only its arrow (its tooltip and accessible name stay).
+    if (layer === layerUpdate && layer.offsetWidth + 2 > chipBox.clientWidth) show(notesLabel, false)
     // Compact chips are as wide as their content; the progress chip as wide as the bar.
     const width = view.kind === "update-progress" ? "100%" : `${layer.offsetWidth + 2}px`
     if (chip.style.width !== width) chip.style.width = width
@@ -616,6 +667,23 @@ function start(api: ClickeredApi): void {
     // panel
     show(panel, expanded)
     setAttr(chevron, "aria-expanded", expanded ? "true" : "false")
+
+    setAttr(preSwitch, "aria-checked", update.prereleases ? "true" : "false")
+    setAttr(
+      preSwitch,
+      "title",
+      update.prereleases
+        ? "On: release candidates and betas are offered too"
+        : "Off: only full releases are offered",
+    )
+    const skipped = update.status === "skipped"
+    show(skippedRow, skipped)
+    if (update.status === "skipped") {
+      setText(skippedText, `Update ${update.version} skipped`)
+      const tipShow = `Show the ${update.version} update notice again`
+      setAttr(unskipBtn, "title", tipShow)
+      setAttr(unskipBtn, "aria-label", `Show update ${update.version} again`)
+    }
     if (!s) return
 
     const hk = formatHotkey(s.hotkey)
@@ -698,6 +766,10 @@ function start(api: ClickeredApi): void {
     render()
   })
   updBtn.addEventListener("click", () => api.installUpdate())
+  skipBtn.addEventListener("click", () => api.skipUpdate())
+  notesBtn.addEventListener("click", () => api.openReleaseNotes())
+  unskipBtn.addEventListener("click", () => api.unskipUpdate())
+  preSwitch.addEventListener("click", () => api.setPrereleaseUpdates(!update.prereleases))
   permBtn.addEventListener("click", () => {
     permPhase = "waiting"
     api.openPermissionSettings()
@@ -746,12 +818,12 @@ function start(api: ClickeredApi): void {
   api.onUpdate((u) => {
     updateSeen = true
     update = u
-    renderChip()
+    render()
   })
   void api.getUpdate().then((u) => {
     if (!updateSeen) {
       update = u
-      renderChip()
+      render()
     }
   })
 }

@@ -51,8 +51,10 @@ export const isAllowedUrl = (raw: string, policy: UrlPolicy): boolean => {
 }
 
 export interface Endpoints {
-  /** The "latest release" query. */
+  /** The "latest release" query (full releases only: the "Pre-release updates" setting off). */
   readonly latest: string
+  /** The release list query (the setting on: release candidates and betas too). */
+  readonly releases: string
   /** Where a release file is downloaded from. */
   readonly download: (tag: string, name: string) => string
   readonly policy: UrlPolicy
@@ -66,13 +68,33 @@ export interface Endpoints {
  * unauthenticated limit of 60 requests per hour and IP is far above one check per start
  * and one per day; when it is hit anyway (many users behind one NAT) the check fails
  * quietly and the next one tries again.
+ *
+ * With "Pre-release updates" on, `GET /repos/{repo}/releases` is asked instead: the newest
+ * `RELEASES_PER_PAGE` releases (newest first by creation date, drafts only ever visible to
+ * the repository's collaborators), from which `selectRelease` picks the highest version.
  */
 export const githubEndpoints = (): Endpoints => ({
   latest: `https://api.github.com/repos/${REPO}/releases/latest`,
+  releases: `https://api.github.com/repos/${REPO}/releases?per_page=${RELEASES_PER_PAGE}`,
   download: (tag, name) =>
     `https://github.com/${REPO}/releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(name)}`,
   policy: GITHUB_POLICY,
 })
+
+/** Releases read by the list query: plenty to find the newest one of each kind. */
+export const RELEASES_PER_PAGE = 30
+
+/**
+ * The GitHub page of a release (its notes / changelog), built only from a valid version:
+ * `https://github.com/<REPO>/releases/tag/v<version>`. Null for anything that is not one.
+ * Opening it is not a download, so it is always github.com, test hooks or not.
+ */
+export const releaseNotesUrl = (version: string): string | null => {
+  const v = version.startsWith("v") ? null : parseVersion(version)
+  if (v === null) return null
+  const url = `https://github.com/${REPO}/releases/tag/${encodeURIComponent(`v${formatVersion(v)}`)}`
+  return isAllowedUrl(url, GITHUB_POLICY) ? url : null
+}
 
 // ---------------------------------------------------------------------------
 // Versions (strict SemVer 2.0.0)
@@ -125,13 +147,15 @@ export const formatVersion = (v: Version): string =>
   `${v.major}.${v.minor}.${v.patch}${v.pre.length ? `-${v.pre.join(".")}` : ""}`
 
 /**
- * The version to offer, or null: only a stable release that is strictly newer than the
- * running one. Malformed versions on either side never offer anything.
+ * The version to offer, or null: only a release that is strictly newer than the running
+ * one, and a stable one unless `prereleases` is set. A running prerelease is offered the
+ * next newer stable release either way. Malformed versions on either side never offer
+ * anything.
  */
-export const offerableVersion = (current: string, latestTag: string): string | null => {
+export const offerableVersion = (current: string, latestTag: string, prereleases = false): string | null => {
   const cur = parseVersion(current.startsWith("v") ? current.slice(1) : current)
   const latest = parseVersion(latestTag)
-  if (!cur || !latest || latest.pre.length > 0) return null
+  if (!cur || !latest || (latest.pre.length > 0 && !prereleases)) return null
   return compareVersions(latest, cur) > 0 ? formatVersion(latest) : null
 }
 
@@ -169,6 +193,8 @@ export const assetNameFor = (t: Target, version: string): string | null => {
 export const MAX_ASSET_BYTES = 400 * 1024 * 1024
 export const MAX_SUMS_BYTES = 64 * 1024
 export const MAX_RELEASE_JSON_BYTES = 1024 * 1024
+/** The release list (`RELEASES_PER_PAGE` releases with their notes and assets). */
+export const MAX_RELEASE_LIST_JSON_BYTES = 8 * 1024 * 1024
 
 export interface ReleaseAsset {
   readonly name: string
@@ -179,6 +205,8 @@ export interface ReleaseAsset {
 
 export interface Offer {
   readonly version: string
+  /** A release candidate / beta (GitHub's `prerelease` flag, matching a "-rc.1" style version). */
+  readonly prerelease: boolean
   readonly tag: string
   readonly asset: ReleaseAsset
   readonly sums: ReleaseAsset
@@ -186,6 +214,8 @@ export interface Offer {
 
 const HEX64 = /^[0-9a-f]{64}$/
 const TAG = /^v?\d+\.\d+\.\d+$/
+/** A prerelease tag: "v1.2.3-rc.1" (no build metadata); `parseVersion` checks the rest. */
+const PRE_TAG = /^v?\d+\.\d+\.\d+-[0-9A-Za-z.-]+$/
 
 const isObj = (u: unknown): u is Record<string, unknown> => typeof u === "object" && u !== null && !Array.isArray(u)
 
@@ -210,15 +240,24 @@ const parseAsset = (u: unknown, name: string, maxBytes: number): Parsed<ReleaseA
 }
 
 /**
- * Turn the `releases/latest` JSON into an offer for this platform, or explain why there is
- * none ("up to date" is an error here too: the caller only logs it).
+ * Turn one release's JSON into an offer for this platform, or explain why there is none
+ * ("up to date" is an error here too: the caller only logs it).
+ *
+ * Drafts are never offered. `prereleases` false (the `releases/latest` answer): only a
+ * release GitHub marks as a full release, with a plain "v1.2.3" tag. `prereleases` true:
+ * a prerelease too, whose flag must agree with its tag ("v1.2.3-rc.1" is a prerelease,
+ * "v1.2.3" is not), so a version's kind is unambiguous.
  */
-export const parseRelease = (json: unknown, current: string, target: Target): Parsed<Offer> => {
+export const parseRelease = (json: unknown, current: string, target: Target, prereleases = false): Parsed<Offer> => {
   if (!isObj(json)) return err("release: not an object")
-  if (json["draft"] !== false || json["prerelease"] !== false) return err("release: draft or prerelease")
+  if (json["draft"] !== false) return err("release: draft")
+  const pre = json["prerelease"]
+  if (pre !== false && pre !== true) return err("release: no prerelease flag")
+  if (pre && !prereleases) return err("release: prerelease")
   const tag = json["tag_name"]
-  if (typeof tag !== "string" || !TAG.test(tag)) return err(`release: unexpected tag ${JSON.stringify(tag)}`)
-  const version = offerableVersion(current, tag)
+  if (typeof tag !== "string" || !(pre ? PRE_TAG : TAG).test(tag))
+    return err(`release: unexpected tag ${JSON.stringify(tag)}${pre ? " for a prerelease" : ""}`)
+  const version = offerableVersion(current, tag, pre)
   if (version === null) return err(`up to date (running ${current}, latest ${tag})`)
   const name = assetNameFor(target, version)
   if (name === null) return err(`no release file for ${target.platform}/${target.arch}`)
@@ -233,7 +272,37 @@ export const parseRelease = (json: unknown, current: string, target: Target): Pa
   if (!asset.ok) return asset
   const sums = parseAsset(sumsRaw, SUMS_NAME, MAX_SUMS_BYTES)
   if (!sums.ok) return sums
-  return ok({ version, tag, asset: asset.value, sums: sums.value })
+  return ok({ version, prerelease: pre, tag, asset: asset.value, sums: sums.value })
+}
+
+/** Most releases `selectRelease` looks at (the query asks for `RELEASES_PER_PAGE`). */
+const MAX_LISTED_RELEASES = 100
+
+/**
+ * Pick the offer from the release list (`GET /repos/{repo}/releases`, the "Pre-release
+ * updates" setting on): the highest version among the releases `parseRelease` (with
+ * prereleases allowed) accepts, i.e. not a draft, newer than the running version, with a
+ * well-formed file for this platform and SHA256SUMS.txt. A release that fails those checks
+ * is passed over, not fatal; two releases with the same version make that version
+ * ambiguous and neither is offered.
+ */
+export const selectRelease = (json: unknown, current: string, target: Target): Parsed<Offer> => {
+  if (!Array.isArray(json)) return err("releases: not a list")
+  if (json.length > MAX_LISTED_RELEASES) return err(`releases: ${json.length} entries`)
+  const offers: Offer[] = []
+  const reasons: string[] = []
+  for (const r of json) {
+    const p = parseRelease(r, current, target, true)
+    if (p.ok) offers.push(p.value)
+    else reasons.push(p.error)
+  }
+  const versionOf = (o: Offer): Version => parseVersion(o.version)!
+  const sorted = offers.sort((a, b) => compareVersions(versionOf(b), versionOf(a)))
+  const [best, next] = sorted
+  if (best === undefined)
+    return err(reasons.length === 0 ? "releases: none published" : `nothing to offer (${[...new Set(reasons)].slice(0, 3).join("; ")})`)
+  if (next !== undefined && next.version === best.version) return err(`releases: ${best.version} is listed twice`)
+  return ok(best)
 }
 
 /**
@@ -284,23 +353,28 @@ export const shouldPushProgress = (lastPushAt: number | null, now: number, progr
  * read ONLY when the app is not packaged (`app.isPackaged` false); a packaged build ignores
  * them all, so neither plain http nor another host can ever be used by a release build.
  *
- *   CLICKERED_UPDATE_BASE_URL  e.g. http://127.0.0.1:8123 — serves both the release query
- *                              (`<base>/repos/ianwijma/clickered/releases/latest`) and the
- *                              files (`<base>/ianwijma/clickered/releases/download/<tag>/<name>`);
- *                              only that origin is allowed (http or https), no GitHub host.
+ *   CLICKERED_UPDATE_BASE_URL  e.g. http://127.0.0.1:8123 — serves the release queries
+ *                              (`<base>/repos/ianwijma/clickered/releases/latest`, and with
+ *                              "Pre-release updates" on `<base>/repos/ianwijma/clickered/
+ *                              releases?per_page=30`) and the files (`<base>/ianwijma/
+ *                              clickered/releases/download/<tag>/<name>`); only that origin is
+ *                              allowed (http or https), no GitHub host.
  *   CLICKERED_UPDATE_FORCE=1   treat this unpackaged copy as an installed one (skip the
  *                              "real installed copy" checks).
  *   CLICKERED_UPDATE_DRY_RUN   path of a file: every install command is appended to it as a
  *                              JSON line ({"cmd":[file,...args]}, then {"action":"relaunch"|
  *                              "quit"}) instead of being run, and the app does not restart.
+ *   CLICKERED_UPDATE_OPEN_LOG  path of a file: the release notes URL (`openReleaseNotes`) is
+ *                              appended to it as a line instead of being opened in a browser.
  */
 export interface TestHooks {
   readonly baseUrl: string | null
   readonly force: boolean
   readonly dryRunLog: string | null
+  readonly openLog: string | null
 }
 
-export const NO_HOOKS: TestHooks = { baseUrl: null, force: false, dryRunLog: null }
+export const NO_HOOKS: TestHooks = { baseUrl: null, force: false, dryRunLog: null, openLog: null }
 
 export const readTestHooks = (env: NodeJS.ProcessEnv, isPackaged: boolean): TestHooks => {
   if (isPackaged) return NO_HOOKS
@@ -315,7 +389,8 @@ export const readTestHooks = (env: NodeJS.ProcessEnv, isPackaged: boolean): Test
     }
   }
   const dry = env["CLICKERED_UPDATE_DRY_RUN"]
-  return { baseUrl, force: env["CLICKERED_UPDATE_FORCE"] === "1", dryRunLog: dry ? dry : null }
+  const open = env["CLICKERED_UPDATE_OPEN_LOG"]
+  return { baseUrl, force: env["CLICKERED_UPDATE_FORCE"] === "1", dryRunLog: dry ? dry : null, openLog: open ? open : null }
 }
 
 /** GitHub, or the test server from `CLICKERED_UPDATE_BASE_URL` (unpackaged only, see above). */
@@ -324,6 +399,7 @@ export const endpointsFor = (hooks: TestHooks): Endpoints => {
   const base = hooks.baseUrl
   return {
     latest: `${base}/repos/${REPO}/releases/latest`,
+    releases: `${base}/repos/${REPO}/releases?per_page=${RELEASES_PER_PAGE}`,
     download: (tag, name) => `${base}/${REPO}/releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(name)}`,
     policy: { hosts: new Set(), extraOrigin: new URL(base).origin },
   }

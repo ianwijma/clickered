@@ -1,7 +1,16 @@
 /**
- * In-app updates: check GitHub for a newer stable release (on startup, then every 24 h),
- * and on request download it, verify it and hand it to the OS installer
- * (./update-install.ts). State goes to the renderer as `UpdateState` (`IPC.update`).
+ * In-app updates: check GitHub for a newer release (on startup, then every 24 h), and on
+ * request download it, verify it and hand it to the OS installer (./update-install.ts).
+ * State goes to the renderer as `UpdateSnapshot` (`IPC.update`): the `UpdateState` plus the
+ * "Pre-release updates" setting, which the updater owns.
+ *
+ * User controls (persisted through `UpdaterDeps.saveSettings`, i.e. config.json):
+ * - "Pre-release updates" (off by default): off, only full releases are offered (the
+ *   `releases/latest` query); on, release candidates and betas too (the release list).
+ *   Changing it checks again at once; turning it off withdraws a prerelease offer. A
+ *   running download/install is never disturbed: the next check applies the setting.
+ * - Skip: the offered version is remembered and shown as "skipped" (no notice) for as long
+ *   as it is exactly the version the check finds; any other version is offered again.
  *
  * Everything that touches the outside world is injected (`UpdaterDeps`): the HTTP client,
  * the "is this a real installed copy" check, the installer and the restart, so the tests
@@ -24,13 +33,17 @@ import { createReadStream } from "node:fs"
 import { chmod, mkdir, open, readdir, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { Data, Effect } from "effect"
-import type { UpdateFailure, UpdateState } from "@shared/ipc"
+import type { UpdateFailure, UpdateSnapshot, UpdateState } from "@shared/ipc"
 import {
   checksumProblem,
+  GITHUB_POLICY,
   isAllowedUrl,
   MAX_RELEASE_JSON_BYTES,
+  MAX_RELEASE_LIST_JSON_BYTES,
   parseRelease,
   parseSha256Sums,
+  releaseNotesUrl,
+  selectRelease,
   shouldPushProgress,
   type Endpoints,
   type Offer,
@@ -294,6 +307,16 @@ export const BUSY_WAIT_MS = 30_000
 export const retryDelay = (failures: number, delays: ReadonlyArray<number> = RETRY_DELAYS_MS): number | null =>
   failures >= MAX_ATTEMPTS ? null : failures === 0 ? 0 : delays[Math.min(failures, delays.length) - 1]!
 
+/** The persisted update settings (config.json `prereleaseUpdates` / `skippedUpdate`). */
+export interface UpdateSettings {
+  /** "Pre-release updates": offer release candidates and betas too. */
+  readonly prereleases: boolean
+  /** The version the user skipped ("1.4.0", no "v"), or null. */
+  readonly skipped: string | null
+}
+
+export const DEFAULT_UPDATE_SETTINGS: UpdateSettings = { prereleases: false, skipped: null }
+
 export interface UpdaterDeps {
   readonly currentVersion: string
   readonly target: Target
@@ -311,7 +334,14 @@ export interface UpdaterDeps {
   readonly afterInstall: (a: Exclude<AfterInstall, { kind: "manual" }>) => void
   /** True while a gesture is being replayed: the install waits for it. */
   readonly isBusy?: () => boolean
-  readonly onState: (s: UpdateState) => void
+  /** Every new snapshot: a state change, or only a change of the setting. */
+  readonly onState: (s: UpdateSnapshot) => void
+  /** The settings as saved; default `DEFAULT_UPDATE_SETTINGS`. */
+  readonly settings?: UpdateSettings
+  /** Persist changed settings (called with the whole new value). */
+  readonly saveSettings?: (s: UpdateSettings) => void
+  /** Open a URL in the default browser; only ever given `releaseNotesUrl` output. */
+  readonly openExternal?: (url: string) => void
   readonly log?: (msg: string) => void
   /** Default 24 h. */
   readonly recheckMs?: number
@@ -325,10 +355,23 @@ export interface UpdaterDeps {
 
 export interface Updater {
   getState(): UpdateState
+  /** What `IPC.getUpdate` answers: the state plus the "Pre-release updates" setting. */
+  getSnapshot(): UpdateSnapshot
   /** Check now (also runs on start and every `recheckMs`). Never fails; problems are logged. */
   check(): Promise<void>
   /** Start download + verify + install. Ignored unless the status is "available" or "failed". */
   install(): void
+  /** Skip the offered version (persisted). Ignored unless the status is "available" or "failed". */
+  skip(): void
+  /** Offer the skipped version again. Ignored unless the status is "skipped". */
+  unskip(): void
+  /** Open the release page of the state's version. Ignored when the status is "none". */
+  openReleaseNotes(): void
+  /**
+   * Change "Pre-release updates": saved, pushed, and checked again right away (resolves when
+   * that check is done). During a download/install only saved; the check follows it.
+   */
+  setPrereleases(enabled: boolean): Promise<void>
   /** Resolves when the running install attempt (if any) has settled; for tests. */
   idle(): Promise<void>
   /** Resolves once no critical install step (see `InstallRequest.critical`) is running. */
@@ -349,8 +392,13 @@ export const startUpdater = (deps: UpdaterDeps, opts: { readonly autoCheck?: boo
     "User-Agent": `Clickered/${deps.currentVersion}`,
   }
 
+  let settings: UpdateSettings = deps.settings ?? DEFAULT_UPDATE_SETTINGS
+  /** Bumped on every setting change: a check started before it is discarded. */
+  let settingsGen = 0
+  /** The setting changed during an install: check again once it has settled. */
+  let recheckAfterInstall = false
   let state: UpdateState = NONE
-  let stateJson = JSON.stringify(state)
+  let snapshotJson = JSON.stringify({ ...state, prereleases: settings.prereleases })
   let offer: Offer | null = null
   let eligibility: Promise<Eligibility> | null = null
   let running: Promise<unknown> = Promise.resolve()
@@ -376,13 +424,30 @@ export const startUpdater = (deps: UpdaterDeps, opts: { readonly autoCheck?: boo
       }),
     )
 
-  const set = (s: UpdateState): void => {
-    const j = JSON.stringify(s)
-    if (j === stateJson) return
-    state = s
-    stateJson = j
-    deps.onState(s)
+  const snapshot = (): UpdateSnapshot => ({ ...state, prereleases: settings.prereleases })
+  /** Push the snapshot when it differs from the last one pushed. */
+  const push = (): void => {
+    const snap = snapshot()
+    const j = JSON.stringify(snap)
+    if (j === snapshotJson) return
+    snapshotJson = j
+    deps.onState(snap)
   }
+  const set = (s: UpdateState): void => {
+    state = s
+    push()
+  }
+  const saveSettings = (next: UpdateSettings): void => {
+    settings = next
+    try {
+      deps.saveSettings?.(next)
+    } catch (e) {
+      log(`could not save the update settings: ${msgOf(e)}`)
+    }
+  }
+  /** How an offer shows: "skipped" when it is exactly the skipped version. */
+  const offerState = (o: Offer): UpdateState =>
+    o.version === settings.skipped ? { status: "skipped", version: o.version } : { status: "available", version: o.version, prerelease: o.prerelease }
   const inFlight = (): boolean => state.status === "downloading" || state.status === "verifying" || state.status === "installing"
 
   const run = <A>(eff: Effect.Effect<A>): Promise<A | undefined> =>
@@ -409,26 +474,35 @@ export const startUpdater = (deps: UpdaterDeps, opts: { readonly autoCheck?: boo
     eligibility ??= deps.eligible().catch((e: unknown) => ({ ok: false as const, why: msgOf(e) }))
     const el = yield* Effect.promise(() => eligibility!)
     if (!el.ok) return yield* new CheckError({ message: `this copy cannot update itself: ${el.why}` })
-    const text = yield* fetchBytes(deps.endpoints.latest, { maxBytes: MAX_RELEASE_JSON_BYTES, exactBytes: null }).pipe(
+    // Full releases only: `releases/latest`, exactly as before the setting existed. With
+    // prereleases: the release list, and the highest version in it.
+    const gen = settingsGen
+    const pre = settings.prereleases
+    const url = pre ? deps.endpoints.releases : deps.endpoints.latest
+    const maxBytes = pre ? MAX_RELEASE_LIST_JSON_BYTES : MAX_RELEASE_JSON_BYTES
+    const text = yield* fetchBytes(url, { maxBytes, exactBytes: null }).pipe(
       Effect.map((b) => b.toString("utf8")),
       Effect.mapError((e) => new CheckError({ message: e.message })),
     )
     const json = yield* Effect.try({ try: (): unknown => JSON.parse(text), catch: () => new CheckError({ message: "release: invalid JSON" }) })
+    // The setting changed meanwhile: the check it started has the say.
+    if (gen !== settingsGen) return
     if (inFlight()) return
-    const parsed = parseRelease(json, deps.currentVersion, deps.target)
+    const parsed = pre ? selectRelease(json, deps.currentVersion, deps.target) : parseRelease(json, deps.currentVersion, deps.target)
     if (!parsed.ok) {
       offer = null
       set(NONE)
       return yield* Effect.sync(() => log(parsed.error))
     }
     const o = parsed.value
-    const known = state.status !== "none" && state.version === o.version
-    offer = o
-    if (!known) {
+    if (offer?.version !== o.version) {
       failures = 0
-      log(`version ${o.version} is available (running ${deps.currentVersion})`)
-      set({ status: "available", version: o.version })
+      log(`version ${o.version}${o.prerelease ? " (prerelease)" : ""} is available (running ${deps.currentVersion})`)
     }
+    // A failed attempt at this same version stays "failed" (its Retry), unless it was skipped.
+    const keep = state.status === "failed" && state.version === o.version && o.version !== settings.skipped
+    offer = o
+    if (!keep) set(offerState(o))
   }).pipe(
     // A failed check never shows anything: what was offered stays offered, otherwise "none".
     Effect.catchTag("CheckError", (e) => Effect.sync(() => log(`check failed: ${e.message}`))),
@@ -557,6 +631,13 @@ export const startUpdater = (deps: UpdaterDeps, opts: { readonly autoCheck?: boo
   // --- startup -----------------------------------------------------------------
   const check = (): Promise<void> => run(checkEff).then(() => undefined)
 
+  /** After an install attempt settled: apply a setting changed during it. */
+  const afterAttempt = async (): Promise<void> => {
+    if (!recheckAfterInstall || stop.signal.aborted || inFlight()) return
+    recheckAfterInstall = false
+    await check()
+  }
+
   if (opts.autoCheck ?? true) {
     void (async () => {
       await cleanDownloads(deps.downloadRoot, deps.beforeClean)
@@ -570,7 +651,48 @@ export const startUpdater = (deps: UpdaterDeps, opts: { readonly autoCheck?: boo
 
   return {
     getState: () => state,
+    getSnapshot: snapshot,
     check,
+    skip: () => {
+      if (stop.signal.aborted || offer === null) return
+      if (state.status !== "available" && state.status !== "failed") return
+      const v = state.version
+      log(`version ${v} skipped`)
+      saveSettings({ ...settings, skipped: v })
+      set({ status: "skipped", version: v })
+    },
+    unskip: () => {
+      if (stop.signal.aborted || offer === null || state.status !== "skipped") return
+      const o = offer
+      log(`version ${o.version} no longer skipped`)
+      saveSettings({ ...settings, skipped: null })
+      set(offerState(o))
+    },
+    openReleaseNotes: () => {
+      if (state.status === "none") return
+      const url = releaseNotesUrl(state.version)
+      if (url === null || !isAllowedUrl(url, GITHUB_POLICY)) return log(`no release page for ${JSON.stringify(state.version)}`)
+      if (deps.openExternal) deps.openExternal(url)
+      else log(`release notes: ${url}`)
+    },
+    setPrereleases: async (enabled) => {
+      if (stop.signal.aborted || enabled === settings.prereleases) return
+      log(`pre-release updates ${enabled ? "on" : "off"}`)
+      settingsGen++
+      saveSettings({ ...settings, prereleases: enabled })
+      if (inFlight()) {
+        push()
+        recheckAfterInstall = true
+        return
+      }
+      // Off: a prerelease offer goes at once, not only when (if) the check below succeeds.
+      if (!enabled && offer?.prerelease) {
+        offer = null
+        state = NONE
+      }
+      push()
+      await check()
+    },
     install: () => {
       if (stop.signal.aborted || offer === null || pendingRetry !== null) return
       if (state.status !== "available" && state.status !== "failed") return
@@ -582,7 +704,7 @@ export const startUpdater = (deps: UpdaterDeps, opts: { readonly autoCheck?: boo
       set({ status: "downloading", version: o.version, progress: 0 })
       const wait = Math.max(0, lastFailureAt + delay - now())
       if (wait === 0) {
-        running = run(installEff(o))
+        running = run(installEff(o)).then(afterAttempt)
         return
       }
       log(`retrying in ${Math.ceil(wait / 1000)} s`)
@@ -590,7 +712,9 @@ export const startUpdater = (deps: UpdaterDeps, opts: { readonly autoCheck?: boo
         pendingRetry = setTimeout(() => {
           pendingRetry = null
           if (stop.signal.aborted) return resolve()
-          void run(installEff(o)).then(() => resolve())
+          void run(installEff(o))
+            .then(afterAttempt)
+            .then(() => resolve())
         }, wait)
         stop.signal.addEventListener(
           "abort",

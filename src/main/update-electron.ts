@@ -3,11 +3,12 @@
  * system proxies and certificates apply), the per-OS eligibility check and installer, and
  * the test hooks. Everything with logic in it lives in ./update*.ts and is unit tested.
  */
+import { appendFile } from "node:fs/promises"
 import { join } from "node:path"
 import { app, net, shell } from "electron"
 import { Effect } from "effect"
-import type { UpdateState } from "@shared/ipc"
-import { endpointsFor, readTestHooks, type TestHooks } from "./update-core"
+import type { UpdateSnapshot } from "@shared/ipc"
+import { endpointsFor, GITHUB_POLICY, isAllowedUrl, readTestHooks, type TestHooks } from "./update-core"
 import {
   cleanMacLeftovers,
   detachStaleMount,
@@ -23,7 +24,15 @@ import {
   recordDryRun,
   windowsEligibility,
 } from "./update-install"
-import { InstallError, startUpdater, type Eligibility, type HttpClient, type HttpResponse, type Updater } from "./update"
+import {
+  InstallError,
+  startUpdater,
+  type Eligibility,
+  type HttpClient,
+  type HttpResponse,
+  type UpdateSettings,
+  type Updater,
+} from "./update"
 
 /** One GET through `net.request`, never following redirects, no cookies or credentials. */
 export const electronHttp: HttpClient = {
@@ -116,7 +125,10 @@ const eligibility = async (hooks: TestHooks): Promise<Eligibility> => {
 }
 
 export interface AppUpdaterOptions {
-  readonly onState: (s: UpdateState) => void
+  readonly onState: (s: UpdateSnapshot) => void
+  /** The saved update settings (config.json), and how to save changed ones. */
+  readonly settings: UpdateSettings
+  readonly saveSettings: (s: UpdateSettings) => void
   readonly isBusy: () => boolean
   /** Restart (`relaunch`) or quit the app; index.ts owns the quit sequence. */
   readonly exit: (relaunch: boolean) => void
@@ -124,7 +136,7 @@ export interface AppUpdaterOptions {
 
 export const startAppUpdater = (opts: AppUpdaterOptions): Updater => {
   const hooks = readTestHooks(process.env, app.isPackaged)
-  if (hooks.baseUrl !== null || hooks.force || hooks.dryRunLog !== null)
+  if (hooks.baseUrl !== null || hooks.force || hooks.dryRunLog !== null || hooks.openLog !== null)
     console.log(`[clickered] update: test hooks active: ${JSON.stringify(hooks)}`)
   const dryRun = hooks.dryRunLog !== null
   const runner = dryRun ? dryRunRunner(hooks.dryRunLog) : nodeRunner
@@ -171,6 +183,17 @@ export const startAppUpdater = (opts: AppUpdaterOptions): Updater => {
     },
     isBusy: opts.isBusy,
     onState: opts.onState,
+    settings: opts.settings,
+    saveSettings: opts.saveSettings,
+    // The updater only passes `releaseNotesUrl` output; checked again right before the OS gets it.
+    openExternal: (url) => {
+      if (!isAllowedUrl(url, GITHUB_POLICY)) return log(`refusing to open ${url}`)
+      if (hooks.openLog !== null) {
+        appendFile(hooks.openLog, url + "\n").catch((e: unknown) => log(`could not record the release notes URL: ${String(e)}`))
+        return
+      }
+      shell.openExternal(url).catch((e: unknown) => log(`could not open the release notes: ${String(e)}`))
+    },
     log,
   })
 }

@@ -8,6 +8,7 @@ import { readFile } from "node:fs/promises"
 import { dirname } from "node:path"
 import { Data, Effect } from "effect"
 import { DEFAULT_TIMING, snapClickDelay, snapClickOffset, type Timing } from "./script"
+import { formatVersion, parseVersion } from "./update-core"
 
 export interface BarPosition {
   readonly x: number
@@ -25,6 +26,10 @@ export interface Config {
   readonly bar: BarPosition | null
   /** Overrides for individual timing constants (unknown/invalid keys are ignored). */
   readonly timing: Partial<Timing>
+  /** "Pre-release updates": also offer release candidates and betas (./update.ts). */
+  readonly prereleaseUpdates: boolean
+  /** The update version the user skipped ("1.4.0", no "v"), or null. */
+  readonly skippedUpdate: string | null
 }
 
 export const DEFAULT_HOTKEY = "Control+`"
@@ -37,6 +42,8 @@ export const DEFAULT_CONFIG: Config = {
   hotkey: DEFAULT_HOTKEY,
   bar: null,
   timing: {},
+  prereleaseUpdates: false,
+  skippedUpdate: null,
 }
 
 export class ConfigReadError extends Data.TaggedError("ConfigReadError")<{ readonly message: string }> {}
@@ -44,6 +51,12 @@ export class ConfigReadError extends Data.TaggedError("ConfigReadError")<{ reado
 const isObj = (u: unknown): u is Record<string, unknown> => typeof u === "object" && u !== null && !Array.isArray(u)
 const str = (u: unknown): string | null => (typeof u === "string" && u.length > 0 ? u : null)
 const finite = (u: unknown): number | null => (typeof u === "number" && Number.isFinite(u) ? u : null)
+/** A SemVer version without a leading "v", normalised (build metadata dropped), or null. */
+const version = (u: unknown): string | null => {
+  if (typeof u !== "string" || u.startsWith("v")) return null
+  const v = parseVersion(u)
+  return v === null ? null : formatVersion(v)
+}
 
 /**
  * Turn arbitrary parsed JSON into a valid Config, keeping every field that is valid.
@@ -72,6 +85,8 @@ export const sanitizeConfig = (raw: unknown): Config => {
     hotkey: str(raw["hotkey"]) ?? DEFAULT_HOTKEY,
     bar: bx !== null && by !== null ? { x: Math.round(bx), y: Math.round(by) } : null,
     timing,
+    prereleaseUpdates: raw["prereleaseUpdates"] === true,
+    skippedUpdate: version(raw["skippedUpdate"]),
   }
 }
 

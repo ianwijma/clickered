@@ -4,14 +4,17 @@
  * so it is never part of a production build.
  *
  *   ?state=empty|picking|waiting|live|paused|busy|partial|error|starting|permission
- *   ?update=available|downloading|verifying|installing|failed-checksum|failed-download|failed-install
- *                   the update chip; "Install"/"Retry" plays the whole sequence on timers
+ *   ?update=available|prerelease|skipped|downloading|verifying|installing|failed-checksum|failed-download|failed-install
+ *                   the update chip; "Install"/"Retry" plays the whole sequence on timers;
+ *                   "Skip" / "Show again" and the "Pre-release updates" switch work too
+ *                   (prerelease = available 1.5.0-rc.1 with the switch on; skipped = 0.3.0
+ *                   skipped; "What's new" just logs to the console)
  *                   (state=permission: "Open Settings" grants the permission after 3 s)
  *   ?cycle          step through all states every 2.5 s
  *   ?expanded       open the panel
  *   ?plain          no fake game backdrop
  */
-import type { AppState, ClickeredApi, GroupWindow, UpdateFailure, UpdateState } from "@shared/ipc"
+import type { AppState, ClickeredApi, GroupWindow, UpdateFailure, UpdateSnapshot, UpdateState } from "@shared/ipc"
 
 const windows = (n: number, overrides: Partial<Record<number, Partial<GroupWindow>>> = {}): GroupWindow[] =>
   Array.from({ length: n }, (_, i) => ({
@@ -70,11 +73,16 @@ const STATES: Record<string, AppState> = {
 }
 
 const VERSION = "0.3.0"
+const PRERELEASE_VERSION = "1.5.0-rc.1"
 
 function updateFromParam(param: string | null): UpdateState {
   switch (param) {
     case "available":
-      return { status: "available", version: VERSION }
+      return { status: "available", version: VERSION, prerelease: false }
+    case "prerelease":
+      return { status: "available", version: PRERELEASE_VERSION, prerelease: true }
+    case "skipped":
+      return { status: "skipped", version: VERSION }
     case "downloading":
       return { status: "downloading", version: VERSION, progress: 0.42 }
     case "verifying":
@@ -113,11 +121,25 @@ export function installMock(): ClickeredApi {
     }, 2500)
   }
 
-  let update = updateFromParam(params.get("update"))
-  const updateListeners = new Set<(u: UpdateState) => void>()
+  let prereleases = params.get("update") === "prerelease"
+  let update: UpdateState = updateFromParam(params.get("update"))
+  const snapshot = (): UpdateSnapshot => ({ ...update, prereleases })
+  const updateListeners = new Set<(u: UpdateSnapshot) => void>()
   const setUpdate = (u: UpdateState): void => {
     update = u
-    for (const l of updateListeners) l(u)
+    for (const l of updateListeners) l(snapshot())
+  }
+  /** The newest offerable release: the pre-release one only while the switch is on. */
+  const offered = (): UpdateState =>
+    prereleases
+      ? { status: "available", version: PRERELEASE_VERSION, prerelease: true }
+      : { status: "available", version: "1.4.0", prerelease: false }
+  /** The version a skip applies to (undefined when nothing is offered). */
+  let skippedVersion: string | undefined = update.status === "skipped" ? update.version : undefined
+  const recheck = (): void => {
+    const next = offered()
+    if (next.status === "available" && next.version === skippedVersion) setUpdate({ status: "skipped", version: skippedVersion })
+    else setUpdate(next)
   }
   let installTimer: ReturnType<typeof setTimeout> | undefined
   /** download 3.2 s -> verify 1.5 s -> install 2.6 s -> back to "available" (a real app restarts). */
@@ -133,7 +155,7 @@ export function installMock(): ClickeredApi {
       setUpdate({ status: "verifying", version: VERSION })
       installTimer = setTimeout(() => {
         setUpdate({ status: "installing", version: VERSION })
-        installTimer = setTimeout(() => setUpdate({ status: "available", version: VERSION }), 2600)
+        installTimer = setTimeout(() => setUpdate({ status: "available", version: VERSION, prerelease: false }), 2600)
       }, 1500)
     }
     tick()
@@ -168,7 +190,7 @@ export function installMock(): ClickeredApi {
       outline.style.height = `${height}px`
       document.title = `Clickered ${width}x${height}`
     },
-    getUpdate: async () => update,
+    getUpdate: async () => snapshot(),
     onUpdate: (l) => {
       updateListeners.add(l)
       return () => updateListeners.delete(l)
@@ -177,6 +199,25 @@ export function installMock(): ClickeredApi {
       if (update.status !== "available" && update.status !== "failed") return
       clearTimeout(installTimer)
       playInstall()
+    },
+    skipUpdate: () => {
+      if (update.status !== "available" && update.status !== "failed") return
+      skippedVersion = update.version
+      setUpdate({ status: "skipped", version: update.version })
+    },
+    unskipUpdate: () => {
+      if (update.status !== "skipped") return
+      skippedVersion = undefined
+      setUpdate({ status: "available", version: update.version, prerelease: update.version === PRERELEASE_VERSION })
+    },
+    openReleaseNotes: () => {
+      if (update.status !== "none") console.info("[mock] open release notes for", update.version)
+    },
+    setPrereleaseUpdates: (enabled) => {
+      prereleases = enabled
+      // A real check takes a moment; skip the install/failed states, which main would also keep.
+      if (update.status === "available" || update.status === "skipped") recheck()
+      else setUpdate(update)
     },
     openPermissionSettings: () => {
       if (current.permission !== "missing") return

@@ -545,6 +545,10 @@ export const startEngine = (opts: EngineOptions): Engine => {
         case "setSize":
         case "quit":
         case "installUpdate":
+        case "skipUpdate":
+        case "unskipUpdate":
+        case "openReleaseNotes":
+        case "setPrereleaseUpdates":
         case "openPermissionSettings":
           return Effect.void // handled by index.ts
       }

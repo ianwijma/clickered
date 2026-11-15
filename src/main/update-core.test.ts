@@ -13,6 +13,8 @@ import {
   parseSha256Sums,
   parseVersion,
   readTestHooks,
+  releaseNotesUrl,
+  selectRelease,
   shouldPushProgress,
   type Target,
 } from "./update-core"
@@ -53,6 +55,14 @@ describe("versions", () => {
     expect(offerableVersion("0.2.0", "v0.3.0-rc.0")).toBeNull() // prerelease
     expect(offerableVersion("0.2.0", "garbage")).toBeNull()
     expect(offerableVersion("dev", "v9.0.0")).toBeNull()
+  })
+
+  it("offers a newer prerelease only when prereleases are allowed", () => {
+    expect(offerableVersion("0.2.0", "v0.3.0-rc.0", true)).toBe("0.3.0-rc.0")
+    expect(offerableVersion("0.3.0-rc.0", "v0.3.0-rc.1", true)).toBe("0.3.0-rc.1")
+    expect(offerableVersion("0.3.0-rc.1", "v0.3.0-rc.0", true)).toBeNull()
+    expect(offerableVersion("0.3.0", "v0.3.0-rc.1", true)).toBeNull() // the release beats its RCs
+    expect(offerableVersion("0.2.0", "v0.3.0", true)).toBe("0.3.0")
   })
 })
 
@@ -96,6 +106,7 @@ describe("parseRelease", () => {
       ok: true,
       value: {
         version: "0.3.0",
+        prerelease: false,
         tag: "v0.3.0",
         asset: { name: "clickered-0.3.0-amd64.deb", size: 1000, sha256: HASH },
         sums: { name: "SHA256SUMS.txt", size: 300, sha256: null },
@@ -138,6 +149,91 @@ describe("parseRelease", () => {
     // Upper-case digests are normalised.
     const upper = parseRelease(release({}, [deb({ digest: `sha256:${"AB".repeat(32)}` }), sums]), "0.2.0", linux)
     expect(upper.ok && upper.value.asset.sha256).toBe("ab".repeat(32))
+  })
+})
+
+describe("parseRelease with prereleases allowed", () => {
+  const rc = (patch: Record<string, unknown> = {}) =>
+    release({ tag_name: "v0.3.0-rc.1", prerelease: true, ...patch }, [
+      { name: "clickered-0.3.0-rc.1-amd64.deb", size: 1000, state: "uploaded" },
+      { name: "SHA256SUMS.txt", size: 300, state: "uploaded" },
+    ])
+
+  it("offers a prerelease, flagged as one", () => {
+    const r = parseRelease(rc(), "0.2.0", linux, true)
+    expect(r.ok && [r.value.version, r.value.prerelease, r.value.tag, r.value.asset.name]).toEqual([
+      "0.3.0-rc.1",
+      true,
+      "v0.3.0-rc.1",
+      "clickered-0.3.0-rc.1-amd64.deb",
+    ])
+    const full = parseRelease(release(), "0.2.0", linux, true)
+    expect(full.ok && full.value.prerelease).toBe(false)
+  })
+
+  it("never offers a draft, and requires the flag to agree with the tag", () => {
+    expect(parseRelease(rc(), "0.2.0", linux, false).ok).toBe(false) // setting off
+    expect(parseRelease(rc({ draft: true }), "0.2.0", linux, true).ok).toBe(false)
+    expect(parseRelease(rc({ draft: undefined }), "0.2.0", linux, true).ok).toBe(false)
+    expect(parseRelease(rc({ prerelease: false }), "0.2.0", linux, true).ok).toBe(false) // "-rc.1" marked full
+    expect(parseRelease(release({ prerelease: true }), "0.2.0", linux, true).ok).toBe(false) // plain tag marked pre
+    expect(parseRelease(rc({ prerelease: "yes" }), "0.2.0", linux, true).ok).toBe(false)
+    expect(parseRelease(rc({ tag_name: "v0.3.0-rc..1" }), "0.2.0", linux, true).ok).toBe(false)
+    expect(parseRelease(rc({ tag_name: "v0.3.0-rc.1+b" }), "0.2.0", linux, true).ok).toBe(false)
+    expect(parseRelease(rc({ tag_name: "v0.3.0-rc/../x" }), "0.2.0", linux, true).ok).toBe(false)
+  })
+})
+
+describe("selectRelease (the release list)", () => {
+  const rel = (tag: string, o: { pre?: boolean; draft?: boolean; files?: string[] } = {}) => {
+    const version = tag.replace(/^v/, "")
+    return {
+      tag_name: tag,
+      draft: o.draft ?? false,
+      prerelease: o.pre ?? version.includes("-"),
+      assets: (o.files ?? [`clickered-${version}-amd64.deb`, "SHA256SUMS.txt"]).map((name) => ({ name, size: 100, state: "uploaded" })),
+    }
+  }
+  const pick = (list: unknown, current = "0.2.0", t: Target = linux) => {
+    const r = selectRelease(list, current, t)
+    return r.ok ? `${r.value.version}${r.value.prerelease ? " pre" : ""}` : null
+  }
+
+  it("picks the highest version, prerelease or not, whatever the list order", () => {
+    expect(pick([rel("v0.3.0"), rel("v0.4.0-rc.1"), rel("v0.2.5")])).toBe("0.4.0-rc.1 pre")
+    expect(pick([rel("v0.4.0-rc.1"), rel("v0.4.0"), rel("v0.4.0-rc.2")])).toBe("0.4.0")
+    expect(pick([rel("v0.4.0-beta.1"), rel("v0.4.0-rc.1"), rel("v0.4.0-beta.2")])).toBe("0.4.0-rc.1 pre")
+  })
+
+  it("passes over drafts, malformed entries and releases without a file for this platform", () => {
+    expect(pick([rel("v0.3.0"), rel("v0.5.0", { draft: true })])).toBe("0.3.0")
+    expect(pick([rel("v0.3.0"), rel("v0.5.0-rc.1", { files: ["clickered-0.5.0-rc.1-x64.exe", "SHA256SUMS.txt"] })])).toBe("0.3.0")
+    expect(pick([rel("v0.3.0"), rel("v0.5.0-rc.1", { files: ["clickered-0.5.0-rc.1-amd64.deb"] })])).toBe("0.3.0")
+    expect(pick([rel("v0.3.0"), null, 5, rel("v0.5.0-rc.1", { pre: false })])).toBe("0.3.0")
+    expect(pick([rel("v0.3.0-rc.1")], "0.2.0", { platform: "linux", arch: "arm64", rosetta: false })).toBeNull()
+  })
+
+  it("handles running a prerelease", () => {
+    expect(pick([rel("v0.3.0-rc.1"), rel("v0.3.0-rc.2")], "0.3.0-rc.1")).toBe("0.3.0-rc.2 pre")
+    expect(pick([rel("v0.3.0-rc.1"), rel("v0.3.0")], "0.3.0-rc.1")).toBe("0.3.0")
+    expect(pick([rel("v0.3.0-rc.1")], "0.3.0-rc.1")).toBeNull()
+  })
+
+  it("offers nothing when up to date, for a non-list, a huge list or a duplicated version", () => {
+    expect(pick([rel("v0.2.0"), rel("v0.1.0")])).toBeNull()
+    expect(pick([])).toBeNull()
+    expect(pick({ tag_name: "v0.3.0" })).toBeNull()
+    expect(pick(Array.from({ length: 101 }, () => rel("v0.3.0")))).toBeNull()
+    expect(pick([rel("v0.3.0"), rel("0.3.0")])).toBeNull()
+  })
+})
+
+describe("releaseNotesUrl", () => {
+  it("builds the GitHub release page from a valid version only", () => {
+    expect(releaseNotesUrl("1.4.0")).toBe("https://github.com/ianwijma/clickered/releases/tag/v1.4.0")
+    expect(releaseNotesUrl("1.5.0-rc.1")).toBe("https://github.com/ianwijma/clickered/releases/tag/v1.5.0-rc.1")
+    for (const bad of ["", "v1.4.0", "1.4", "1.4.0/../../x", "1.4.0?x=1", "1.4.0#x", "../1.0.0", "javascript:alert(1)"])
+      expect(releaseNotesUrl(bad)).toBeNull()
   })
 })
 
@@ -199,6 +295,8 @@ describe("isAllowedUrl", () => {
   it("builds GitHub URLs with the tag and name encoded", () => {
     const e = githubEndpoints()
     expect(e.latest).toBe("https://api.github.com/repos/ianwijma/clickered/releases/latest")
+    expect(e.releases).toBe("https://api.github.com/repos/ianwijma/clickered/releases?per_page=30")
+    expect(isAllowedUrl(e.releases, GITHUB_POLICY)).toBe(true)
     expect(e.download("v1.0.0", "SHA256SUMS.txt")).toBe(
       "https://github.com/ianwijma/clickered/releases/download/v1.0.0/SHA256SUMS.txt",
     )
@@ -211,6 +309,7 @@ describe("test hooks", () => {
     CLICKERED_UPDATE_BASE_URL: "http://127.0.0.1:8123/",
     CLICKERED_UPDATE_FORCE: "1",
     CLICKERED_UPDATE_DRY_RUN: "/tmp/dry.log",
+    CLICKERED_UPDATE_OPEN_LOG: "/tmp/open.log",
   }
 
   it("are ignored entirely by a packaged build", () => {
@@ -222,9 +321,11 @@ describe("test hooks", () => {
 
   it("redirect everything to the test server when unpackaged", () => {
     const hooks = readTestHooks(env, false)
-    expect(hooks).toEqual({ baseUrl: "http://127.0.0.1:8123", force: true, dryRunLog: "/tmp/dry.log" })
+    expect(hooks).toEqual({ baseUrl: "http://127.0.0.1:8123", force: true, dryRunLog: "/tmp/dry.log", openLog: "/tmp/open.log" })
     const e = endpointsFor(hooks)
     expect(e.latest).toBe("http://127.0.0.1:8123/repos/ianwijma/clickered/releases/latest")
+    expect(e.releases).toBe("http://127.0.0.1:8123/repos/ianwijma/clickered/releases?per_page=30")
+    expect(isAllowedUrl(e.releases, e.policy)).toBe(true)
     expect(e.download("v1.0.0", "x.deb")).toBe("http://127.0.0.1:8123/ianwijma/clickered/releases/download/v1.0.0/x.deb")
     expect(isAllowedUrl("http://127.0.0.1:8123/anything", e.policy)).toBe(true)
     // Only that origin: not GitHub, not another port.

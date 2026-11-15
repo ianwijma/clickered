@@ -55,6 +55,8 @@ interface ReleaseConfig {
   sums: "ok" | "wrong"
   /** Send the package shorter than announced (a broken download). */
   truncate: boolean
+  /** Tag of a newer prerelease, listed only by the releases list query (not by /latest); null for none. */
+  pre: string | null
 }
 
 interface ReleaseServer {
@@ -66,7 +68,7 @@ interface ReleaseServer {
 }
 
 const startReleaseServer = async (init: Partial<ReleaseConfig> = {}): Promise<ReleaseServer> => {
-  const cfg: ReleaseConfig = { tag: `v${NEW}`, sums: "ok", truncate: false, ...init }
+  const cfg: ReleaseConfig = { tag: `v${NEW}`, sums: "ok", truncate: false, pre: null, ...init }
   const requests: string[] = []
   const sumsText = (): string => `${cfg.sums === "ok" ? sha256(PAYLOAD) : "0".repeat(64)}  ${ASSET}\n`
   const srv: Server = createServer((req, res) => {
@@ -89,6 +91,23 @@ const startReleaseServer = async (init: Partial<ReleaseConfig> = {}): Promise<Re
           ],
         }),
       )
+      return
+    }
+    if (path === `/repos/${REPO}/releases?per_page=30`) {
+      const rel = (tag: string, prerelease: boolean): unknown => {
+        const version = tag.replace(/^v/, "")
+        return {
+          tag_name: tag,
+          draft: false,
+          prerelease,
+          assets: [
+            { name: `clickered-${version}-amd64.deb`, size: PAYLOAD.length, state: "uploaded" },
+            { name: SUMS, size: Buffer.byteLength(sumsText()), state: "uploaded" },
+          ],
+        }
+      }
+      const list = [...(cfg.pre ? [rel(cfg.pre, true)] : []), ...(cfg.tag ? [rel(cfg.tag, false)] : [])]
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(list))
       return
     }
     const dl = `/${REPO}/releases/download/${encodeURIComponent(cfg.tag ?? "")}/`
@@ -142,8 +161,8 @@ interface Launched {
   readonly userData: string
 }
 
-const launch = async (env: Record<string, string>): Promise<Launched> => {
-  const home = mkdtempSync(join(tmpdir(), "clickered-home-"))
+const launch = async (env: Record<string, string>, reuseHome?: string): Promise<Launched> => {
+  const home = reuseHome ?? mkdtempSync(join(tmpdir(), "clickered-home-"))
   const electronPath = (await import("electron")).default as unknown as string
   app = await _electron.launch({
     executablePath: electronPath,
@@ -256,6 +275,15 @@ const shot = async (page: Page, name: string): Promise<void> => {
   await page.emulateMedia({ colorScheme: null })
 }
 
+/** The releases list query (pre-release updates on) was answered, and the chip had time to settle. */
+const checkedList = async (srv: ReleaseServer, count = 1): Promise<void> => {
+  await waitFor(() => srv.requests.filter((p) => p.includes("/releases?per_page=")).length >= count, "the releases list query", 20_000)
+  await sleep(1500)
+}
+
+const readConfig = (userData: string): { prereleaseUpdates?: boolean; skippedUpdate?: string | null } =>
+  existsSync(join(userData, "config.json")) ? JSON.parse(readFileSync(join(userData, "config.json"), "utf8")) : {}
+
 /** The latest-release query was answered and the app had time to show (or not show) the chip. */
 const checked = async (srv: ReleaseServer): Promise<void> => {
   await waitFor(() => srv.requests.some((p) => p.endsWith("/releases/latest")), "the update check", 20_000)
@@ -271,7 +299,7 @@ describe("chip e2e (Electron, fake release server, Xvfb)", () => {
     const dry = join(dir, "install.log")
     const { page, userData } = await launch(updateEnv(server, dry))
 
-    await page.getByText(`Update ${NEW} available`).waitFor({ timeout: 20_000 })
+    await page.getByText(`Update ${NEW}`).waitFor({ timeout: 20_000 })
     await waitForChipLayout(page, false)
     await shot(page, "update-available")
 
@@ -407,12 +435,120 @@ describe("chip e2e (Electron, fake release server, Xvfb)", () => {
     })
   }
 
+  it("an available update shows What's new, Skip and Install; What's new opens the release page", async () => {
+    server = await startReleaseServer()
+    const log = join(mkdtempSync(join(tmpdir(), "clickered-open-")), "open.log")
+    const { page } = await launch({ ...updateEnv(server, null), CLICKERED_UPDATE_OPEN_LOG: log })
+    await page.getByText(`Update ${NEW}`, { exact: true }).waitFor({ timeout: 20_000 })
+    await waitForChipLayout(page, false)
+    expect(await page.getByRole("button", { name: `What's new in ${NEW}` }).textContent()).toBe("What's new")
+    expect(await page.getByRole("button", { name: `Skip ${NEW}` }).textContent()).toBe("Skip")
+    expect(await page.getByRole("button", { name: "Install the update" }).isVisible()).toBe(true)
+    expect(await page.evaluate(`document.querySelector('[aria-live="polite"] [data-active]').getAttribute("title")`)).not.toBe("Pre-release version")
+    await shot(page, "update-available-actions")
+
+    await page.getByRole("button", { name: `What's new in ${NEW}` }).click()
+    await waitFor(() => existsSync(log), "the release notes URL", 5000)
+    expect(readFileSync(log, "utf8")).toBe(`https://github.com/${REPO}/releases/tag/v${NEW}\n`)
+    // Nothing else happened: the chip is still offering the update.
+    expect(await chipText(page)).toContain(`Update ${NEW}`)
+  })
+
+  it("Skip removes the chip, survives a restart, and Show again brings it back", async () => {
+    server = await startReleaseServer()
+    const first = await launch(updateEnv(server, null))
+    await first.page.getByRole("button", { name: `Skip ${NEW}` }).click({ timeout: 20_000 })
+    await waitInPage(first.page, `document.querySelector('[aria-live="polite"]').parentElement.hidden`, 5000)
+    await first.page.getByRole("button", { name: "Windows & settings" }).click()
+    await first.page.getByText(`Update ${NEW} skipped`).waitFor()
+    await shot(first.page, "update-skipped")
+    await waitFor(() => existsSync(join(first.userData, "config.json")) && readConfig(first.userData).skippedUpdate === NEW, "config.json skippedUpdate", 5000)
+
+    // Restart on the same profile: still skipped.
+    await app!.close()
+    app = null
+    server.requests.length = 0
+    const second = await launch(updateEnv(server, null), first.home)
+    await checked(server)
+    expect(await chipText(second.page)).toBe("")
+    await second.page.getByRole("button", { name: "Windows & settings" }).click()
+    await second.page.getByText(`Update ${NEW} skipped`).waitFor()
+
+    await second.page.getByRole("button", { name: `Show update ${NEW} again` }).click()
+    await second.page.getByText(`Update ${NEW}`, { exact: true }).waitFor({ timeout: 10_000 })
+    await second.page.getByText(`Update ${NEW} skipped`).waitFor({ state: "hidden" })
+    await waitFor(() => readConfig(second.userData).skippedUpdate === null, "config.json skippedUpdate cleared", 5000)
+  })
+
+  it("a skipped version stays skipped while a different version is offered", async () => {
+    server = await startReleaseServer()
+    const first = await launch(updateEnv(server, null))
+    await first.page.getByRole("button", { name: `Skip ${NEW}` }).click({ timeout: 20_000 })
+    await waitFor(() => existsSync(join(first.userData, "config.json")) && readConfig(first.userData).skippedUpdate === NEW, "config.json skippedUpdate", 5000)
+    await app!.close()
+    app = null
+
+    server.cfg.tag = "v9.9.10"
+    const second = await launch(updateEnv(server, null), first.home)
+    await second.page.getByText("Update 9.9.10", { exact: true }).waitFor({ timeout: 20_000 })
+    await waitForChipLayout(second.page, false)
+    // The old skip is still recorded (it is only replaced when the user skips again).
+    expect(readConfig(second.userData).skippedUpdate).toBe(NEW)
+  })
+
+  it("pre-release updates: off by default, on offers the prerelease, off withdraws it", async () => {
+    server = await startReleaseServer({ tag: `v${NEW}`, pre: "v9.10.0-rc.1" })
+    const { page, userData } = await launch(updateEnv(server, null))
+    // Off: only /latest is asked, and the stable release is offered, not the prerelease.
+    await page.getByText(`Update ${NEW}`, { exact: true }).waitFor({ timeout: 20_000 })
+    expect(server.requests.filter((p) => p.startsWith(`/repos/${REPO}/`))).toEqual([`/repos/${REPO}/releases/latest`])
+
+    await page.getByRole("button", { name: "Windows & settings" }).click()
+    const sw = page.getByRole("switch", { name: "Pre-release updates" })
+    expect(await sw.getAttribute("aria-checked")).toBe("false")
+    await sw.click()
+    await page.getByText("Update 9.10.0-rc.1", { exact: true }).waitFor({ timeout: 20_000 })
+    expect(await sw.getAttribute("aria-checked")).toBe("true")
+    expect(server.requests).toContain(`/repos/${REPO}/releases?per_page=30`)
+    expect(await page.evaluate(`document.querySelector('[aria-live="polite"] [data-active]').getAttribute("title")`)).toBe("Pre-release version")
+    await waitFor(() => readConfig(userData).prereleaseUpdates === true, "config.json prereleaseUpdates", 5000)
+    await shot(page, "update-prerelease")
+
+    await sw.click()
+    await page.getByText("Update 9.10.0-rc.1", { exact: true }).waitFor({ state: "hidden", timeout: 20_000 })
+    await page.getByText(`Update ${NEW}`, { exact: true }).waitFor({ timeout: 20_000 })
+    expect(await page.evaluate(`document.querySelector('[aria-live="polite"] [data-active]').getAttribute("title")`)).not.toBe("Pre-release version")
+    await waitFor(() => readConfig(userData).prereleaseUpdates === false, "config.json prereleaseUpdates", 5000)
+  })
+
+  it("a newer prerelease is not offered while the setting is off, and is when it was saved on", async () => {
+    server = await startReleaseServer({ tag: null, pre: "v9.10.0-rc.1" })
+    const { page, home, userData } = await launch(updateEnv(server, null))
+    await checked(server)
+    expect(await chipText(page)).toBe("")
+    expect(server.requests.some((p) => p.includes("per_page"))).toBe(false)
+
+    await page.getByRole("button", { name: "Windows & settings" }).click()
+    await page.getByRole("switch", { name: "Pre-release updates" }).click()
+    await page.getByText("Update 9.10.0-rc.1", { exact: true }).waitFor({ timeout: 20_000 })
+
+    // The setting survives a restart: the list is queried from the start.
+    await waitFor(() => readConfig(userData).prereleaseUpdates === true, "config.json prereleaseUpdates", 5000)
+    await app!.close()
+    app = null
+    server.requests.length = 0
+    const second = await launch(updateEnv(server, null), home)
+    await second.page.getByText("Update 9.10.0-rc.1", { exact: true }).waitFor({ timeout: 20_000 })
+    expect(server.requests.filter((p) => p.startsWith(`/repos/${REPO}/`))).toEqual([`/repos/${REPO}/releases?per_page=30`])
+    await checkedList(server)
+  })
+
   it("hides the chip while picking and fades it with the pill during a replay", async () => {
     wm = await startFakeWm()
     const w = wm
     server = await startReleaseServer()
     const { page } = await launch(updateEnv(server, null))
-    await page.getByText(`Update ${NEW} available`).waitFor({ timeout: 20_000 })
+    await page.getByText(`Update ${NEW}`).waitFor({ timeout: 20_000 })
 
     // Picking: no chip; it comes back after Done.
     await page.getByRole("button", { name: /Grab windows/ }).click()
@@ -428,7 +564,7 @@ describe("chip e2e (Electron, fake release server, Xvfb)", () => {
     await page.getByText("2 selected · click more").waitFor()
     await page.getByRole("button", { name: /Finish picking/ }).click()
     await page.getByText("2 windows").waitFor()
-    await page.getByText(`Update ${NEW} available`).waitFor()
+    await page.getByText(`Update ${NEW}`).waitFor()
     await waitForChipLayout(page, false)
 
     // A long click delay keeps the replay (and the fade) going for a while.

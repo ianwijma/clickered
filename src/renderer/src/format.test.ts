@@ -117,10 +117,10 @@ describe("chipView", () => {
     expect(chipView(none, state([]), "idle").kind).toBe("none")
     expect(chipView(none, null, "idle").kind).toBe("none")
     const picking = { ...missing, picking: true }
-    expect(chipView({ status: "available", version: "1.0.0" }, picking, "idle").kind).toBe("none")
+    expect(chipView({ status: "available", version: "1.0.0", prerelease: false }, picking, "idle").kind).toBe("none")
   })
   it("prefers the permission chip over the update chip", () => {
-    const upd: UpdateState = { status: "available", version: "1.0.0" }
+    const upd: UpdateState = { status: "available", version: "1.0.0", prerelease: false }
     expect(chipView(upd, missing, "idle")).toEqual({ kind: "permission-missing", text: "macOS permission missing" })
     expect(chipView(upd, missing, "waiting").kind).toBe("permission-waiting")
     expect(chipView(upd, state([]), "granted").kind).toBe("permission-granted")
@@ -128,10 +128,19 @@ describe("chipView", () => {
   })
   it("describes the update steps", () => {
     const s = state([])
-    expect(chipView({ status: "available", version: "0.3.0" }, s, "idle")).toEqual({
+    expect(chipView({ status: "available", version: "0.3.0", prerelease: false }, s, "idle")).toEqual({
       kind: "update-available",
-      text: "Update 0.3.0 available",
+      text: "Update 0.3.0",
+      version: "0.3.0",
+      prerelease: false,
     })
+    expect(chipView({ status: "available", version: "1.5.0-rc.1", prerelease: true }, s, "idle")).toEqual({
+      kind: "update-available",
+      text: "Update 1.5.0-rc.1",
+      version: "1.5.0-rc.1",
+      prerelease: true,
+    })
+    expect(chipView({ status: "skipped", version: "0.3.0" }, s, "idle")).toEqual({ kind: "none" })
     expect(chipView({ status: "downloading", version: "0.3.0", progress: 0.456 }, s, "idle")).toEqual({
       kind: "update-progress",
       title: "Updating to 0.3.0",
@@ -152,6 +161,6 @@ describe("chipView", () => {
     })
     expect(
       chipView({ status: "failed", version: "0.3.0", reason: "download", message: "ECONNRESET" }, s, "idle"),
-    ).toEqual({ kind: "update-failed", text: "Update download failed", message: "ECONNRESET" })
+    ).toEqual({ kind: "update-failed", text: "Update download failed", version: "0.3.0", message: "ECONNRESET" })
   })
 })

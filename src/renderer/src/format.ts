@@ -71,8 +71,13 @@ export function permissionPhaseAfter(
 export type ChipView =
   | { readonly kind: "none" }
   | { readonly kind: "permission-missing" | "permission-waiting" | "permission-granted"; readonly text: string }
-  | { readonly kind: "update-available"; readonly text: string }
-  | { readonly kind: "update-failed"; readonly text: string; readonly message: string }
+  | {
+      readonly kind: "update-available"
+      readonly text: string
+      readonly version: string
+      readonly prerelease: boolean
+    }
+  | { readonly kind: "update-failed"; readonly text: string; readonly version: string; readonly message: string }
   /** `progress` is a whole percent, or null while it cannot be measured (indeterminate bar). */
   | {
       readonly kind: "update-progress"
@@ -109,9 +114,15 @@ export function chipView(update: UpdateState, state: AppState | null, phase: Per
   }
   switch (update.status) {
     case "none":
+    case "skipped":
       return { kind: "none" }
     case "available":
-      return { kind: "update-available", text: `Update ${update.version} available` }
+      return {
+        kind: "update-available",
+        text: `Update ${update.version}`,
+        version: update.version,
+        prerelease: update.prerelease,
+      }
     case "downloading": {
       const pct = progressPercent(update.progress)
       return { kind: "update-progress", title: `Updating to ${update.version}`, sub: `Downloading · ${pct}%`, progress: pct }
@@ -131,6 +142,11 @@ export function chipView(update: UpdateState, state: AppState | null, phase: Per
         progress: null,
       }
     case "failed":
-      return { kind: "update-failed", text: updateFailureText(update.reason), message: update.message }
+      return {
+        kind: "update-failed",
+        text: updateFailureText(update.reason),
+        version: update.version,
+        message: update.message,
+      }
   }
 }

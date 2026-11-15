@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Effect } from "effect"
 import { afterEach, describe, expect, it } from "vitest"
-import type { UpdateState } from "@shared/ipc"
+import type { UpdateSnapshot } from "@shared/ipc"
 import { GITHUB_POLICY, githubEndpoints, type Target } from "./update-core"
 import {
   ChecksumError,
@@ -19,6 +19,7 @@ import {
   type HttpClient,
   type HttpResponse,
   type InstallRequest,
+  type UpdateSettings,
   type Updater,
   type UpdaterDeps,
 } from "./update"
@@ -134,7 +135,7 @@ const setup = (
   over: Partial<UpdaterDeps> & { installResult?: Effect.Effect<AfterInstall, InstallError | ChecksumError> } = {},
 ) => {
   const root = join(mkdtempSync(join(tmpdir(), "clickered-upd-")), "updates")
-  const states: UpdateState[] = []
+  const states: UpdateSnapshot[] = []
   const installs: InstallRequest[] = []
   const after: string[] = []
   const logs: string[] = []
@@ -168,8 +169,9 @@ describe("check", () => {
   it("offers a newer release", async () => {
     const { u, states } = setup(github())
     await u.check()
-    expect(u.getState()).toEqual({ status: "available", version: VERSION })
-    expect(states).toEqual([{ status: "available", version: VERSION }])
+    expect(u.getState()).toEqual({ status: "available", version: VERSION, prerelease: false })
+    expect(u.getSnapshot()).toEqual({ status: "available", version: VERSION, prerelease: false, prereleases: false })
+    expect(states).toEqual([{ status: "available", version: VERSION, prerelease: false, prereleases: false }])
     await u.check() // the same offer again: no new push
     expect(states).toHaveLength(1)
   })
@@ -575,7 +577,7 @@ describe("retry backoff and cap (fix 6)", () => {
       }),
     }
     await u.check()
-    expect(u.getState()).toEqual({ status: "available", version: next })
+    expect(u.getState()).toEqual({ status: "available", version: next, prerelease: false })
     u.install()
     await u.idle()
     expect(u.getState().status).toBe("failed") // the fake release has no files: a download failure
@@ -662,3 +664,261 @@ describe("startup cleanup hook (fix 5)", () => {
   })
 })
 
+
+// ---------------------------------------------------------------------------
+// Pre-release updates, skip, release notes
+
+/** A release JSON for `tag` with a .deb and SHA256SUMS.txt (enough to be offered). */
+const rel = (tag: string, o: { draft?: boolean; pre?: boolean } = {}) => {
+  const version = tag.replace(/^v/, "")
+  return {
+    tag_name: tag,
+    draft: o.draft ?? false,
+    prerelease: o.pre ?? version.includes("-"),
+    assets: [
+      { name: `clickered-${version}-amd64.deb`, size: 10, state: "uploaded" },
+      { name: "SHA256SUMS.txt", size: 10, state: "uploaded" },
+    ],
+  }
+}
+/** `releases/latest` answers v0.3.0 (the github() fake); the list adds whatever is given. */
+const withList = (list: unknown[], base: Record<string, Route> = github()): Record<string, Route> => ({
+  ...base,
+  [e.releases]: { body: JSON.stringify(list) },
+})
+const RC = "0.4.0-rc.1"
+
+const settingsSetup = (
+  routes: Record<string, Route>,
+  initial: UpdateSettings,
+  over: Parameters<typeof setup>[1] = {},
+) => {
+  const saved: UpdateSettings[] = []
+  const opened: string[] = []
+  const r = setup(routes, {
+    settings: initial,
+    saveSettings: (s) => saved.push(s),
+    openExternal: (url) => opened.push(url),
+    ...over,
+  })
+  return { ...r, saved, opened }
+}
+const OFF: UpdateSettings = { prereleases: false, skipped: null }
+const ON: UpdateSettings = { prereleases: true, skipped: null }
+
+describe("pre-release updates", () => {
+  it("off: only releases/latest is asked, a prerelease there is never offered", async () => {
+    const { u, requested } = settingsSetup(withList([rel(`v${RC}`)]), OFF)
+    await u.check()
+    expect(u.getSnapshot()).toEqual({ status: "available", version: VERSION, prerelease: false, prereleases: false })
+    expect(requested).toEqual([e.latest])
+
+    const pre = settingsSetup(github({ release: { tag_name: `v${RC}`, prerelease: true } }), OFF)
+    await pre.u.check()
+    expect(pre.u.getState()).toEqual({ status: "none" })
+  })
+
+  it("on: the newest non-draft release from the list, prerelease or not", async () => {
+    const { u, requested } = settingsSetup(withList([rel("v0.3.0"), rel(`v${RC}`), rel("v0.5.0", { draft: true })]), ON)
+    await u.check()
+    expect(u.getSnapshot()).toEqual({ status: "available", version: RC, prerelease: true, prereleases: true })
+    expect(requested).toEqual([e.releases])
+
+    const full = settingsSetup(withList([rel(`v${RC}`), rel("v0.4.0")]), ON)
+    await full.u.check()
+    expect(full.u.getState()).toEqual({ status: "available", version: "0.4.0", prerelease: false })
+  })
+
+  it("on: passes over the newest release when it has no file for this platform", async () => {
+    const noDeb = { ...rel("v0.5.0-rc.1"), assets: [{ name: "SHA256SUMS.txt", size: 10, state: "uploaded" }] }
+    const { u } = settingsSetup(withList([noDeb, rel(`v${RC}`)]), ON)
+    await u.check()
+    expect(u.getState()).toEqual({ status: "available", version: RC, prerelease: true })
+  })
+
+  it("running a prerelease with the setting off: stays on it, offered the next newer full release", async () => {
+    const newer = settingsSetup(github(), OFF, { currentVersion: "0.3.0-rc.2" })
+    await newer.u.check()
+    expect(newer.u.getState()).toEqual({ status: "available", version: VERSION, prerelease: false })
+    const older = settingsSetup(github(), OFF, { currentVersion: "0.3.1-rc.1" })
+    await older.u.check()
+    expect(older.u.getState()).toEqual({ status: "none" })
+  })
+
+  it("toggling saves, pushes the setting, and checks again at once", async () => {
+    const { u, saved, states, requested } = settingsSetup(withList([rel(`v${RC}`)]), OFF)
+    await u.check()
+    states.length = 0
+    await u.setPrereleases(true)
+    expect(saved).toEqual([ON])
+    expect(requested).toEqual([e.latest, e.releases])
+    // The setting first (same state), then the prerelease offer.
+    expect(states).toEqual([
+      { status: "available", version: VERSION, prerelease: false, prereleases: true },
+      { status: "available", version: RC, prerelease: true, prereleases: true },
+    ])
+    await u.setPrereleases(true) // no change: nothing saved, nothing asked
+    expect(saved).toHaveLength(1)
+    expect(requested).toHaveLength(2)
+  })
+
+  it("pushes the setting even when there is no offer (and when the check fails)", async () => {
+    const { u, states, saved } = settingsSetup({ [e.latest]: { status: 404 }, [e.releases]: { status: 403 } }, OFF)
+    await u.setPrereleases(true)
+    expect(states).toEqual([{ status: "none", prereleases: true }])
+    expect(saved).toEqual([ON])
+  })
+
+  it("turning it off withdraws a prerelease offer, even when the new check fails", async () => {
+    const routes = withList([rel(`v${RC}`)])
+    const { u, states } = settingsSetup(routes, ON)
+    await u.check()
+    expect(u.getState()).toEqual({ status: "available", version: RC, prerelease: true })
+    routes[e.latest] = { status: 500 }
+    await u.setPrereleases(false)
+    expect(u.getSnapshot()).toEqual({ status: "none", prereleases: false })
+    expect(states.at(-1)).toEqual({ status: "none", prereleases: false })
+    // With a reachable GitHub, the full release is offered instead.
+    routes[e.latest] = github()[e.latest]!
+    await u.setPrereleases(true)
+    await u.setPrereleases(false)
+    expect(u.getState()).toEqual({ status: "available", version: VERSION, prerelease: false })
+  })
+
+  it("a check that started before the setting changed is discarded", async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => (release = r))
+    const routes = withList([rel(`v${RC}`)])
+    const base = fakeHttp(routes)
+    const http: HttpClient = {
+      get: async (url, h, s) => {
+        if (url === e.latest) await gate
+        return base.http.get(url, h, s)
+      },
+    }
+    const { u } = settingsSetup(routes, OFF, { http })
+    const slow = u.check() // stuck on releases/latest
+    await sleep(10)
+    await u.setPrereleases(true)
+    expect(u.getState()).toEqual({ status: "available", version: RC, prerelease: true })
+    release()
+    await slow
+    expect(u.getState()).toEqual({ status: "available", version: RC, prerelease: true })
+  })
+
+  it("does not disturb a running install; the setting applies after it", async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => (release = r))
+    const { u, installs, requested, saved } = settingsSetup(withList([rel(`v${RC}`)]), OFF, {
+      install: (req) => {
+        installs.push(req)
+        return Effect.promise(() => gate).pipe(Effect.flatMap(() => Effect.fail(new InstallError({ message: "cancelled" }))))
+      },
+    })
+    await u.check()
+    u.install()
+    while (u.getState().status !== "installing") await sleep(5)
+    await u.setPrereleases(true)
+    expect(saved).toEqual([ON])
+    expect(u.getSnapshot()).toEqual({ status: "installing", version: VERSION, prereleases: true })
+    expect(requested).not.toContain(e.releases)
+    release()
+    await u.idle()
+    expect(installs).toHaveLength(1)
+    expect(requested).toContain(e.releases)
+    expect(u.getState()).toEqual({ status: "available", version: RC, prerelease: true })
+  })
+})
+
+describe("skip", () => {
+  it("skips the offered version, persists it, and keeps it skipped on re-checks", async () => {
+    const { u, saved, states } = settingsSetup(github(), OFF)
+    await u.check()
+    u.skip()
+    expect(u.getSnapshot()).toEqual({ status: "skipped", version: VERSION, prereleases: false })
+    expect(states.at(-1)).toEqual({ status: "skipped", version: VERSION, prereleases: false })
+    expect(saved).toEqual([{ prereleases: false, skipped: VERSION }])
+    await u.check()
+    expect(u.getState()).toEqual({ status: "skipped", version: VERSION })
+    u.install() // not from "skipped"
+    await u.idle()
+    expect(u.getState()).toEqual({ status: "skipped", version: VERSION })
+  })
+
+  it("stays skipped across a restart, until a different version is the newest", async () => {
+    const routes = github()
+    const first = settingsSetup(routes, OFF)
+    await first.u.check()
+    first.u.skip()
+    const persisted = first.saved.at(-1)!
+    first.u.shutdown()
+
+    const second = settingsSetup(routes, persisted)
+    await second.u.check()
+    expect(second.u.getState()).toEqual({ status: "skipped", version: VERSION })
+    expect(second.states).toEqual([{ status: "skipped", version: VERSION, prereleases: false }])
+
+    routes[e.latest] = { body: JSON.stringify(rel("v0.4.0")) }
+    await second.u.check()
+    expect(second.u.getState()).toEqual({ status: "available", version: "0.4.0", prerelease: false })
+  })
+
+  it("matches the skipped version exactly (a prerelease offer in between does not clear it)", async () => {
+    const { u, saved } = settingsSetup(withList([rel("v0.3.0"), rel(`v${RC}`)]), OFF)
+    await u.check()
+    u.skip() // 0.3.0
+    await u.setPrereleases(true)
+    expect(u.getState()).toEqual({ status: "available", version: RC, prerelease: true })
+    await u.setPrereleases(false)
+    expect(u.getState()).toEqual({ status: "skipped", version: VERSION })
+    expect(saved.at(-1)).toEqual({ prereleases: false, skipped: VERSION })
+  })
+
+  it("unskip offers the skipped version again (also after a restart)", async () => {
+    const { u, saved } = settingsSetup(github(), { prereleases: false, skipped: VERSION })
+    await u.check()
+    expect(u.getState()).toEqual({ status: "skipped", version: VERSION })
+    u.unskip()
+    expect(u.getState()).toEqual({ status: "available", version: VERSION, prerelease: false })
+    expect(saved).toEqual([OFF])
+    await u.check()
+    expect(u.getState()).toEqual({ status: "available", version: VERSION, prerelease: false })
+    u.unskip() // not skipped: ignored
+    expect(saved).toHaveLength(1)
+  })
+
+  it("can skip a failed version, but not while nothing is offered or an install runs", async () => {
+    const { u, saved } = settingsSetup(github(), OFF, { installResult: failOnce() })
+    u.skip() // nothing offered
+    expect(u.getState()).toEqual({ status: "none" })
+    await u.check()
+    u.install()
+    u.skip() // downloading: ignored
+    expect(u.getState().status).toBe("downloading")
+    await u.idle()
+    expect(u.getState().status).toBe("failed")
+    expect(saved).toEqual([])
+    u.skip()
+    expect(u.getState()).toEqual({ status: "skipped", version: VERSION })
+    expect(saved).toEqual([{ prereleases: false, skipped: VERSION }])
+  })
+})
+
+describe("release notes", () => {
+  it("opens the GitHub release page of the state's version, never with nothing offered", async () => {
+    const { u, opened } = settingsSetup(withList([rel(`v${RC}`)]), OFF)
+    u.openReleaseNotes()
+    expect(opened).toEqual([])
+    await u.check()
+    u.openReleaseNotes()
+    u.skip()
+    u.openReleaseNotes()
+    await u.setPrereleases(true)
+    u.openReleaseNotes()
+    expect(opened).toEqual([
+      "https://github.com/ianwijma/clickered/releases/tag/v0.3.0",
+      "https://github.com/ianwijma/clickered/releases/tag/v0.3.0",
+      `https://github.com/ianwijma/clickered/releases/tag/v${RC}`,
+    ])
+  })
+})

@@ -65,9 +65,21 @@ On every start, and once a day while it runs, Clickered asks GitHub for the late
 release (`api.github.com/repos/ianwijma/clickered/releases/latest`). That is the only
 thing it contacts by itself, and the request carries no identifying data beyond your
 IP address and the app version (in the `User-Agent`). If the check fails (offline, rate limited), nothing is shown. When a
-newer stable release exists, the bar shows a small chip with an **Install** button;
-nothing is downloaded until you click it. A copy run from source, or not installed
-from a release package, never offers updates.
+newer stable release exists, the bar shows a small chip with **What's new**, **Skip** and
+**Install** buttons; nothing is downloaded until you click Install. A copy run from
+source, or not installed from a release package, never offers updates.
+
+- **What's new** opens that version's release page on GitHub in your browser.
+- **Skip** hides the chip for that version. The panel (the chevron next to the bar)
+  then shows "Update <version> skipped" with a **Show again** button. A newer version
+  is still offered. The choice is kept in `config.json` as `skippedUpdate`.
+- **Pre-release updates**, a switch in the panel, is off by default. When it is on,
+  release candidates are offered too, with an amber dot and the title "Pre-release
+  version", and the app asks for the list of releases
+  (`api.github.com/repos/ianwijma/clickered/releases`) instead of `.../releases/latest`.
+  Still the only thing it contacts by itself, with the same request data. Switching it
+  off withdraws an offered pre-release. The choice is kept in `config.json` as
+  `prereleaseUpdates`.
 
 **Install** downloads the file for your OS from the GitHub release (only from
 `github.com` and GitHub's download servers, over HTTPS), checks its size and its
@@ -145,7 +157,7 @@ container, so your real desktop is never touched:
 2. `e2e/engine.e2e.test.ts` — real helper + engine: picking, click/drag replay, pause, pinned master, Escape.
 3. `e2e/app.e2e.test.ts` — the built Electron app driven through the bar UI with Playwright.
 4. `e2e/chip.e2e.test.ts` — the chip under the bar: in-app updates against a local fake release server (dry run,
-   nothing is installed), and the macOS permission chip with the fake helper. With `-e E2E_SHOTS=/shots -v
+   nothing is installed; also Skip, What's new and Pre-release updates), and the macOS permission chip with the fake helper. With `-e E2E_SHOTS=/shots -v
    <dir>:/shots` it also saves a screenshot of every chip state in dark and light.
 
 The E2E suites refuse to run outside the container. Pass a filter through to vitest with

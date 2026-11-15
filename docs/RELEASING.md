@@ -15,7 +15,7 @@ Each release has these files:
 | `SHA256SUMS.txt` | Checksums of the files above. |
 
 **Installed apps depend on these names.** The in-app updater (`src/main/update*.ts`,
-README.md "Updates") reads the latest stable release from the GitHub API and downloads
+README.md "Updates") reads the latest stable release (or, for users who opted in, the newest release including prereleases) from the GitHub API and downloads
 exactly `clickered-<version>-amd64.deb` / `-arm64.dmg` / `-x64.dmg` / `-x64.exe`
 plus `SHA256SUMS.txt` (in `sha256sum` format, one `<hex>  <name>` line per file) from
 `github.com/ianwijma/clickered/releases/download/<tag>/`. Every copy already out there
@@ -32,8 +32,12 @@ installs it as root:root 0755, and the app refuses to run it under any other pat
 owner or mode, which would make every Linux update fail. Check a built package with
 `dpkg-deb -c dist/clickered-*-amd64.deb | grep install-update`; its arguments and exit
 codes (64 bad arguments, 65 checksum mismatch) are what installed apps of this and later
-versions call, so change them only compatibly. Prereleases are never offered; marking a release as
-**latest** offers it to everyone on their next start.
+versions call, so change them only compatibly. Prereleases are offered only to users who turned on
+"Pre-release updates" (the app then reads `releases?per_page=30` instead of
+`releases/latest`). The prerelease flag on GitHub must agree with the tag:
+`v1.3.0-rc.1` must be marked prerelease and `v1.3.0` must not, because a release where
+they disagree is never offered. Marking a stable release as **latest** offers it to
+everyone on their next start.
 
 Each one includes the native helper for its OS. Both dmgs contain the same universal
 macOS helper. Until signing certificates are set up (see "Code signing" below) the

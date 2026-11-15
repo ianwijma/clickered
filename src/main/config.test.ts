@@ -23,6 +23,8 @@ describe("sanitizeConfig", () => {
       hotkey: "Alt+F1",
       bar: { x: 10.4, y: 20.6 },
       timing: { clickHold: 50 },
+      prereleaseUpdates: true,
+      skippedUpdate: "1.4.0-rc.1",
     })
     expect(c).toEqual({
       groupClass: "steam_app_1",
@@ -32,6 +34,8 @@ describe("sanitizeConfig", () => {
       hotkey: "Alt+F1",
       bar: { x: 10, y: 21 },
       timing: { clickHold: 50 },
+      prereleaseUpdates: true,
+      skippedUpdate: "1.4.0-rc.1",
     })
   })
 
@@ -44,8 +48,21 @@ describe("sanitizeConfig", () => {
       hotkey: 5,
       bar: { x: 1 },
       timing: "fast",
+      prereleaseUpdates: "true",
+      skippedUpdate: "latest",
     })
     expect(c).toEqual(DEFAULT_CONFIG)
+  })
+
+  it("keeps the update settings only when well-formed", () => {
+    expect(DEFAULT_CONFIG.prereleaseUpdates).toBe(false)
+    expect(DEFAULT_CONFIG.skippedUpdate).toBeNull()
+    for (const bad of ["true", 1, null, {}, false]) expect(sanitizeConfig({ prereleaseUpdates: bad }).prereleaseUpdates).toBe(false)
+    expect(sanitizeConfig({ prereleaseUpdates: true }).prereleaseUpdates).toBe(true)
+    for (const ok of ["1.4.0", "0.3.0-rc.1", "10.0.0-beta.2"]) expect(sanitizeConfig({ skippedUpdate: ok }).skippedUpdate).toBe(ok)
+    expect(sanitizeConfig({ skippedUpdate: "1.4.0+build.7" }).skippedUpdate).toBe("1.4.0") // normalised
+    for (const bad of ["v1.4.0", "1.4", "", " 1.4.0", "1.4.0/../x", "9".repeat(80), 140, null, ["1.4.0"]])
+      expect(sanitizeConfig({ skippedUpdate: bad }).skippedUpdate).toBeNull()
   })
 
   it("snaps the click offset to the nearest allowed value", () => {
@@ -141,13 +158,21 @@ describe("ConfigStore", () => {
     store.update({ hotkey: "Alt+A" })
     store.update({ clickOffset: 5 })
     store.update({ clickDelay: 200 })
+    store.update({ prereleaseUpdates: true, skippedUpdate: "1.4.0" })
     expect(store.get().hotkey).toBe("Alt+A")
     expect(existsSync(p)).toBe(false)
     await sleep(80)
     expect(existsSync(p)).toBe(true)
     expect(existsSync(`${p}.tmp`)).toBe(false)
     const back = await Effect.runPromise(loadConfig(p))
-    expect(back).toEqual({ ...DEFAULT_CONFIG, hotkey: "Alt+A", clickOffset: 5, clickDelay: 200 })
+    expect(back).toEqual({
+      ...DEFAULT_CONFIG,
+      hotkey: "Alt+A",
+      clickOffset: 5,
+      clickDelay: 200,
+      prereleaseUpdates: true,
+      skippedUpdate: "1.4.0",
+    })
   })
 
   it("does not schedule a write for a no-op update", async () => {

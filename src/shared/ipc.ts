@@ -71,8 +71,14 @@ export type UpdateState =
   /** Nothing to show: not checked yet, up to date, the check failed, or this copy of the
    *  app cannot update itself (dev run, not installed from a release package). */
   | { readonly status: "none" }
-  /** A newer release exists; `installUpdate` starts it. `version` has no leading "v". */
-  | { readonly status: "available"; readonly version: string }
+  /** A newer release exists; `installUpdate` starts it. `version` has no leading "v".
+   *  `prerelease` is true for a release candidate / beta, which is only ever offered while
+   *  the "Pre-release updates" setting is on (the chip then shows an amber dot). */
+  | { readonly status: "available"; readonly version: string; readonly prerelease: boolean }
+  /** The newest offerable release is the one the user skipped (`skipUpdate`): no chip, the
+   *  panel shows "Update <version> skipped" with "Show again" (`unskipUpdate`). A release
+   *  with any other version is offered as "available" again. */
+  | { readonly status: "skipped"; readonly version: string }
   /** `progress` is the downloaded fraction, 0..1. */
   | { readonly status: "downloading"; readonly version: string; readonly progress: number }
   /** The download is complete and its SHA-256 checksum is being checked. */
@@ -81,6 +87,15 @@ export type UpdateState =
   | { readonly status: "installing"; readonly version: string }
   /** `installUpdate` retries from the start. `message` is a short technical detail (tooltip). */
   | { readonly status: "failed"; readonly version: string; readonly reason: UpdateFailure; readonly message: string }
+
+/**
+ * What crosses `IPC.update` / `IPC.getUpdate`: the update state plus the "Pre-release
+ * updates" setting (owned by the updater, persisted in config.json, off by default).
+ */
+export type UpdateSnapshot = UpdateState & {
+  /** True when release candidates and betas are offered too; false = full releases only. */
+  readonly prereleases: boolean
+}
 
 /** Exposed on `window.clickered` by the preload script. */
 export interface ClickeredApi {
@@ -105,12 +120,23 @@ export interface ClickeredApi {
   /** Renderer reports the pixel size its content needs; main resizes the frameless window. */
   setSize(width: number, height: number): void
   /** Current update snapshot (call once on startup). */
-  getUpdate(): Promise<UpdateState>
+  getUpdate(): Promise<UpdateSnapshot>
   /** Subscribe to update snapshots. Returns an unsubscribe function. */
-  onUpdate(listener: (update: UpdateState) => void): () => void
+  onUpdate(listener: (update: UpdateSnapshot) => void): () => void
   /** Download, verify and install the available update (also the "Retry" after a failure).
    *  Ignored unless the status is "available" or "failed". */
   installUpdate(): void
+  /** Skip the offered version: status becomes "skipped" and stays so (across restarts)
+   *  until a release with a different version is the newest offerable one. Ignored unless
+   *  the status is "available" or "failed". */
+  skipUpdate(): void
+  /** Undo `skipUpdate`: the skipped version is offered again. Ignored unless "skipped". */
+  unskipUpdate(): void
+  /** Open the GitHub release page (changelog) of the update's version in the default
+   *  browser. Main builds the URL itself. Ignored when the status is "none". */
+  openReleaseNotes(): void
+  /** Turn the "Pre-release updates" setting on or off; main saves it and checks again. */
+  setPrereleaseUpdates(enabled: boolean): void
   /** Open the OS settings page where the missing permission is granted (macOS: Privacy &
    *  Security > Accessibility). Ignored when `permission` is "ok". */
   openPermissionSettings(): void
@@ -137,5 +163,9 @@ export type IpcCommand =
   | { readonly c: "setClickDelay"; readonly ms: number }
   | { readonly c: "setSize"; readonly width: number; readonly height: number }
   | { readonly c: "installUpdate" }
+  | { readonly c: "skipUpdate" }
+  | { readonly c: "unskipUpdate" }
+  | { readonly c: "openReleaseNotes" }
+  | { readonly c: "setPrereleaseUpdates"; readonly enabled: boolean }
   | { readonly c: "openPermissionSettings" }
   | { readonly c: "quit" }

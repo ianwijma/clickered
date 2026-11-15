@@ -19,6 +19,9 @@ export const parseCommand = (u: unknown): IpcCommand | null => {
     case "cancelPick":
     case "clearGroup":
     case "installUpdate":
+    case "skipUpdate":
+    case "unskipUpdate":
+    case "openReleaseNotes":
     case "openPermissionSettings":
     case "quit":
       return { c: o["c"] }
@@ -30,6 +33,8 @@ export const parseCommand = (u: unknown): IpcCommand | null => {
       return isNum(o["px"]) ? { c: "setClickOffset", px: o["px"] } : null
     case "setClickDelay":
       return isNum(o["ms"]) ? { c: "setClickDelay", ms: o["ms"] } : null
+    case "setPrereleaseUpdates":
+      return isBool(o["enabled"]) ? { c: "setPrereleaseUpdates", enabled: o["enabled"] } : null
     case "setSize":
       return isNum(o["width"]) && isNum(o["height"]) ? { c: "setSize", width: o["width"], height: o["height"] } : null
     default:

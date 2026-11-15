@@ -12,12 +12,20 @@ describe("parseCommand", () => {
     expect(parseCommand({ c: "setClickDelay", ms: 100 })).toEqual({ c: "setClickDelay", ms: 100 })
     expect(parseCommand({ c: "installUpdate" })).toEqual({ c: "installUpdate" })
     expect(parseCommand({ c: "openPermissionSettings" })).toEqual({ c: "openPermissionSettings" })
+    expect(parseCommand({ c: "skipUpdate" })).toEqual({ c: "skipUpdate" })
+    expect(parseCommand({ c: "unskipUpdate" })).toEqual({ c: "unskipUpdate" })
+    expect(parseCommand({ c: "openReleaseNotes" })).toEqual({ c: "openReleaseNotes" })
+    expect(parseCommand({ c: "setPrereleaseUpdates", enabled: true })).toEqual({ c: "setPrereleaseUpdates", enabled: true })
+    expect(parseCommand({ c: "setPrereleaseUpdates", enabled: false })).toEqual({ c: "setPrereleaseUpdates", enabled: false })
   })
 
   it("drops every payload of the update and permission commands", () => {
     // Nothing from the renderer may choose what is downloaded or which page is opened.
     expect(parseCommand({ c: "installUpdate", url: "https://evil.example/x.deb", version: "9.9.9" })).toEqual({ c: "installUpdate" })
     expect(parseCommand({ c: "openPermissionSettings", url: "file:///etc/passwd" })).toEqual({ c: "openPermissionSettings" })
+    expect(parseCommand({ c: "openReleaseNotes", url: "https://evil.example", version: "1.0.0" })).toEqual({ c: "openReleaseNotes" })
+    expect(parseCommand({ c: "skipUpdate", version: "9.9.9" })).toEqual({ c: "skipUpdate" })
+    expect(parseCommand({ c: "unskipUpdate", version: "9.9.9" })).toEqual({ c: "unskipUpdate" })
   })
 
   it("drops extra fields", () => {
@@ -46,6 +54,9 @@ describe("parseCommand", () => {
       { c: "installupdate" },
       { c: ["installUpdate"] },
       { c: "openPermissionSettings ", url: "x" },
+      { c: "setPrereleaseUpdates" },
+      { c: "setPrereleaseUpdates", enabled: "true" },
+      { c: "setPrereleaseUpdates", enabled: 1 },
     ]) {
       expect(parseCommand(bad)).toBeNull()
     }

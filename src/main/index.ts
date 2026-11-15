@@ -6,7 +6,7 @@ import { appendFile } from "node:fs/promises"
 import { join } from "node:path"
 import { app, BrowserWindow, globalShortcut, ipcMain, screen, shell } from "electron"
 import { Effect } from "effect"
-import { IPC, type UpdateState } from "@shared/ipc"
+import { IPC, type UpdateSnapshot } from "@shared/ipc"
 import { parseCommand } from "./command"
 import { ConfigStore, loadConfig, type BarPosition } from "./config"
 import { permissionSettingsUrl, startEngine, type Engine } from "./engine"
@@ -159,7 +159,9 @@ function main(): void {
     win !== null && !win.isDestroyed() && e.sender === win.webContents && e.senderFrame === win.webContents.mainFrame
 
   ipcMain.handle(IPC.getState, (e) => (fromBar(e) ? (engine?.getState() ?? null) : null))
-  ipcMain.handle(IPC.getUpdate, (e): UpdateState | null => (fromBar(e) ? (updater?.getState() ?? { status: "none" }) : null))
+  ipcMain.handle(IPC.getUpdate, (e): UpdateSnapshot | null =>
+    fromBar(e) ? (updater?.getSnapshot() ?? { status: "none", prereleases: config?.get().prereleaseUpdates ?? false }) : null,
+  )
   ipcMain.on(IPC.command, (e, raw: unknown) => {
     if (!fromBar(e)) return
     const cmd = parseCommand(raw)
@@ -171,6 +173,14 @@ function main(): void {
         return app.quit()
       case "installUpdate":
         return updater?.install()
+      case "skipUpdate":
+        return updater?.skip()
+      case "unskipUpdate":
+        return updater?.unskip()
+      case "openReleaseNotes":
+        return updater?.openReleaseNotes()
+      case "setPrereleaseUpdates":
+        return void updater?.setPrereleases(cmd.enabled)
       case "openPermissionSettings":
         return openPermissionSettings()
       default:
@@ -257,6 +267,8 @@ function main(): void {
       onState: (u) => {
         if (win && !win.isDestroyed()) win.webContents.send(IPC.update, u)
       },
+      settings: { prereleases: store.get().prereleaseUpdates, skipped: store.get().skippedUpdate },
+      saveSettings: (s) => store.update({ prereleaseUpdates: s.prereleases, skippedUpdate: s.skipped }),
       isBusy: () => engine?.getState().busy ?? false,
       exit: (relaunch) => {
         if (relaunch) app.relaunch()

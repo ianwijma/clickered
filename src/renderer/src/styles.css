@@ -69,6 +69,16 @@
   animation: panel-in 140ms ease-out;
 }
 
+/* While a replay runs the window is click-through (see main): fade it out quickly, and
+   come back only after a short pause so back-to-back replays don't make it flicker. */
+.replay-fade {
+  transition: opacity 200ms ease-out 300ms;
+}
+.replay-fade[data-replaying] {
+  opacity: 0.2;
+  transition: opacity 80ms ease-out;
+}
+
 @keyframes soft-pulse {
   50% {
     opacity: 0.35;

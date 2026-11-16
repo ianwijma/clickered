@@ -255,6 +255,13 @@ export interface LinuxContext {
 }
 
 /** Running from /opt/Clickered, and dpkg has the `clickered` package installed at this version. */
+/**
+ * The version dpkg reports for an app version: electron-builder writes a .deb's version with
+ * every "-" turned into "~" (app-builder-lib `getSanitizedVersion`), so "0.3.0-rc.0" is
+ * installed as "0.3.0~rc.0" (which, as Debian wants, sorts before "0.3.0").
+ */
+export const debVersionOf = (version: string): string => version.replace(/-/g, "~")
+
 export const linuxEligibility = async (
   execPath: string,
   currentVersion: string,
@@ -267,7 +274,7 @@ export const linuxEligibility = async (
   if (r.code !== 0) return { ok: false, why: `dpkg does not know ${PACKAGE_NAME}: ${lastErrorLine(r.stderr)}` }
   const [status, version, arch] = r.stdout.trim().split("\t")
   if (status !== "install ok installed") return { ok: false, why: `package state "${status}"` }
-  if (version !== currentVersion) return { ok: false, why: `dpkg has ${version}, running ${currentVersion}` }
+  if (version !== debVersionOf(currentVersion)) return { ok: false, why: `dpkg has ${version}, running ${currentVersion}` }
   if (arch !== "amd64") return { ok: false, why: `package architecture ${arch}` }
   return { ok: true }
 }

@@ -19,6 +19,7 @@ import {
   installMac,
   installWindows,
   lastErrorLine,
+  debVersionOf,
   linuxEligibility,
   macBundleOf,
   macEligibility,
@@ -233,9 +234,22 @@ describe("Linux", () => {
       ["/opt/Clickered/clickered", "install ok installed\t0.2.0\tarm64", 0],
     ] as const)
       expect((await linuxEligibility(exec, "0.2.0", dpkg(out, code), fs)).ok).toBe(false)
+    // A prerelease: the .deb carries "0.3.0~rc.0" (electron-builder's "-" -> "~"), the app "0.3.0-rc.0".
+    const rc = "install ok installed\t0.3.0~rc.0\tamd64"
+    expect(await linuxEligibility("/opt/Clickered/clickered", "0.3.0-rc.0", dpkg(rc), fs)).toEqual({ ok: true })
+    expect((await linuxEligibility("/opt/Clickered/clickered", "0.3.0-rc.1", dpkg(rc), fs)).ok).toBe(false)
+    expect((await linuxEligibility("/opt/Clickered/clickered", "0.3.0", dpkg(rc), fs)).ok).toBe(false)
     // /usr/bin/clickered is a symlink into /opt: resolved first.
     const viaLink = fsWith({ realpath: async () => "/opt/Clickered/clickered" })
     expect(await linuxEligibility("/usr/bin/clickered", "0.2.0", dpkg(good), viaLink)).toEqual({ ok: true })
+  })
+})
+
+describe("debVersionOf", () => {
+  it("turns every - into ~, as electron-builder does for a .deb", () => {
+    expect(debVersionOf("0.2.0")).toBe("0.2.0")
+    expect(debVersionOf("0.3.0-rc.0")).toBe("0.3.0~rc.0")
+    expect(debVersionOf("1.0.0-beta-2")).toBe("1.0.0~beta~2")
   })
 })
 

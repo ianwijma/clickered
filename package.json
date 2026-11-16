@@ -1,6 +1,6 @@
 {
   "name": "clickered",
-  "version": "0.3.0-rc.4",
+  "version": "0.3.0-rc.5",
   "description": "Replicate mouse clicks and drags from one window to a group of windows (Linux/X11, macOS, Windows).",
   "license": "MIT",
   "private": true,

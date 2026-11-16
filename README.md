@@ -28,6 +28,11 @@ Download from the [latest release](https://github.com/ianwijma/clickered/release
 | macOS 11+, Intel | `clickered-X.Y.Z-x64.dmg` |
 | Windows 10/11 x64 | `clickered-X.Y.Z-x64.exe` (installs for the current user, no admin rights needed) |
 
+Graphical .deb installers such as Eddy (Pop!_OS) work too, release candidates included.
+If you installed 0.3.0-rc.0, rc.1 or rc.2, Eddy shows the next version as a "Downgrade"
+once: those packages were versioned `0.3.0~rc.N`, which Eddy misreads. It is an
+upgrade; click it, or use `apt install` or the in-app updater (see [Updates](#updates)).
+
 `SHA256SUMS.txt` has the checksums. Releasing: [docs/RELEASING.md](docs/RELEASING.md).
 
 The builds are **not signed** with an Apple or Microsoft certificate yet, so the first

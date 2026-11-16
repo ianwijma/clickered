@@ -139,6 +139,27 @@ describe("engine (fake helper)", () => {
     )
   })
 
+  it("collects wheel ticks until the wheel is still, then replays them in one go", async () => {
+    const tick = (time: number) => btn(true, 5, 20, 0.5, 0.25, 1020, 383, time)
+    const { seqs } = setup({ events: [tick(1000), tick(1030), tick(1060)] })
+    await waitFor(() => seqs().length === 1)
+    const ticks = "d 5;u 5;s 12;d 5;u 5;s 12;d 5;u 5;s 12"
+    expect(seqs()[0]).toBe(`seq 1 m 10 0.50000 0.25000;s 20;${ticks};m 30 0.50000 0.25000;s 20;${ticks};w 1020 383;f 20`)
+    await sleep(400)
+    expect(seqs().length).toBe(1)
+  })
+
+  it("does not replay a wheel tick before the wheel has been still for wheelIdle", async () => {
+    const { engine, seqs } = setup({
+      config: { timing: { wheelIdle: 400 } },
+      events: [btn(true, 4, 20, 0.5, 0.25, 1020, 383, 1000)],
+    })
+    await waitFor(() => engine.getState().masterId === 20)
+    await sleep(150)
+    expect(seqs()).toEqual([])
+    await waitFor(() => seqs().length === 1)
+  })
+
   it("ignores gestures from non-group windows, excluded windows, and when disabled", async () => {
     const { engine, seqs } = setup({
       events: [

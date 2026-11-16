@@ -203,6 +203,8 @@ export const startEngine = (opts: EngineOptions): Engine => {
     let helper: Helper | null = null
     let rec: Recording | null = null
     let waiting: Gesture[] = []
+    /** When the last wheel tick was queued (`Date.now()`), see the replay loop. */
+    let lastWheelAt = 0
     /** Window id from a `picked` whose class we did not know yet (waiting for a `windows`). */
     let pickedUnknown: WindowId | null = null
 
@@ -234,6 +236,7 @@ export const startEngine = (opts: EngineOptions): Engine => {
     const enqueue = (g: Gesture): Effect.Effect<void> =>
       Effect.sync(() => {
         waiting = enqueueCoalesced(waiting, g, timing)
+        if (g.kind === "wheel") lastWheelAt = Date.now()
         Queue.offerUnsafe(wake, true)
       })
 
@@ -271,7 +274,21 @@ export const startEngine = (opts: EngineOptions): Engine => {
     yield* Effect.forever(
       Effect.gen(function* () {
         yield* Queue.take(wake)
-        for (let g = waiting.shift(); g; g = waiting.shift()) yield* replay(g)
+        for (let g = waiting[0]; g; g = waiting[0]) {
+          // A wheel gesture that is still the newest thing recorded is held back until the
+          // wheel has been still for `wheelIdle` (and no press is being recorded): replaying
+          // takes the pointer away from the source, which would end the user's own scroll
+          // after the first tick. Anything recorded after it means the scroll is over.
+          if (g.kind === "wheel" && waiting.length === 1) {
+            const left = rec ? 20 : lastWheelAt + timing.wheelIdle - Date.now()
+            if (left > 0) {
+              yield* Effect.sleep(Duration.millis(left))
+              continue
+            }
+          }
+          waiting.shift()
+          yield* replay(g)
+        }
       }),
     ).pipe(Effect.forkScoped)
 

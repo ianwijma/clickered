@@ -27,6 +27,12 @@ export interface Timing {
   readonly wheelTickGap: number
   /** wheel: maximum ticks replayed for one coalesced wheel gesture. */
   readonly wheelMaxTicks: number
+  /**
+   * wheel: how long the wheel must be still before the ticks are replayed. Replaying warps
+   * the pointer away from the source, so starting on the first tick would cut the user's
+   * own scroll short; the ticks are collected until the user stops scrolling instead.
+   */
+  readonly wheelIdle: number
   /** Root-pixel radius within which a press/release counts as a click. Also used for wheel coalescing. */
   readonly clickSlop: number
   /** Gestures longer than this are discarded. */
@@ -48,6 +54,7 @@ export const DEFAULT_TIMING: Timing = {
   wheelMoveSettle: 20,
   wheelTickGap: 12,
   wheelMaxTicks: 60,
+  wheelIdle: 250,
   clickSlop: 6,
   maxGestureMs: 20000,
   seqTimeoutSlack: 3000,

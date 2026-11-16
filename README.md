@@ -28,6 +28,14 @@ Download from the [latest release](https://github.com/ianwijma/clickered/release
 | macOS 11+, Intel | `clickered-X.Y.Z-x64.dmg` |
 | Windows 10/11 x64 | `clickered-X.Y.Z-x64.exe` (installs for the current user, no admin rights needed) |
 
+To upgrade an installed .deb by hand, use the same `apt install` command (or the in-app
+updater, see [Updates](#updates)). Pop!_OS's default .deb installer, Eddy (1.3.3 and
+older), compares versions with its own code instead of dpkg's: it only looks at the part
+before a `~`, so it shows two release candidates (`0.3.0~rc.1`, `0.3.0~rc.2`; the .deb
+writes `-rc.N` as `~rc.N`) as the same version and offers no Update button. It also
+shows some real upgrades as a "Downgrade", e.g. `0.3.0` → `0.3.1`, or a release
+candidate → the final release. apt and dpkg order all of these correctly.
+
 `SHA256SUMS.txt` has the checksums. Releasing: [docs/RELEASING.md](docs/RELEASING.md).
 
 The builds are **not signed** with an Apple or Microsoft certificate yet, so the first

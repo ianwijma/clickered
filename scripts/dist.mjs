@@ -17,7 +17,9 @@
 // without any signature does not run at all.
 //
 // Flags: --dir  only build the unpacked app (dist/<platform>-unpacked), no installer.
+import { readFileSync } from "node:fs"
 import { build, Platform } from "electron-builder"
+import { debVersionParts } from "./deb-version.mjs"
 
 const dirOnly = process.argv.includes("--dir")
 
@@ -56,6 +58,16 @@ if (process.platform === "darwin" && !has("CSC_LINK", "CSC_NAME")) {
 }
 if (process.platform === "win32" && !has("CSC_LINK", "WIN_CSC_LINK")) {
   console.log("dist: no code signing certificate (CSC_LINK / WIN_CSC_LINK): the installer is unsigned.")
+}
+
+if (process.platform === "linux") {
+  // The .deb's version: 0.3.0 -> 0.3.0-1, 0.3.0-rc.2 -> 0.3.0-0.rc.2 (scripts/deb-version.mjs,
+  // which explains why). electron-builder would write 0.3.0~rc.2, which Eddy cannot order.
+  // Its fpm arguments come after electron-builder's own, so these win; the file name still
+  // uses the package.json version (clickered-0.3.0-rc.2-amd64.deb).
+  const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"))
+  const { upstream, revision } = debVersionParts(version)
+  overrides.deb = { fpm: ["--version", upstream, "--iteration", revision] }
 }
 
 const targets = dirOnly ? platform.createTarget("dir") : platform.createTarget()

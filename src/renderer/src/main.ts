@@ -364,7 +364,8 @@ function start(api: ClickeredApi): void {
 
   const TEXT_BTN =
     "h-7 rounded-md px-2 text-xs font-medium text-zinc-600 hover:bg-zinc-900/[.07] hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/10 dark:hover:text-zinc-100"
-  const hotkeyHint = el("span", `flex-1 truncate px-2 text-xs ${MUTED}`)
+  const hotkeyHint = el("span", `min-w-0 flex-1 basis-0 truncate px-2 text-xs ${MUTED}`)
+  const versionText = el("span", `shrink-0 px-1 text-xs tabular-nums ${MUTED}`, `v${__APP_VERSION__}`)
   const forgetBtn = button(TEXT_BTN, "Remove all windows from the group", "Forget group")
   const quitBtn = button(
     TEXT_BTN + " hover:!text-red-700 dark:hover:!text-red-300",
@@ -402,7 +403,14 @@ function start(api: ClickeredApi): void {
     preRow,
     skippedRow,
     divider(),
-    el("div", "flex items-center gap-0.5", hotkeyHint, forgetBtn, quitBtn),
+    // Hint and buttons take equal flex space so the version sits in the middle of the row.
+    el(
+      "div",
+      "flex items-center gap-0.5",
+      hotkeyHint,
+      versionText,
+      el("div", "flex flex-1 basis-0 items-center justify-end gap-0.5", forgetBtn, quitBtn),
+    ),
   )
 
   const root = el("div", "replay-fade inline-flex w-max flex-col gap-1.5 p-2.5 font-sans antialiased", bar, chipBox, panel)

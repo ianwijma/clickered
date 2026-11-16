@@ -22,7 +22,9 @@ On X11:
    re-activate the source window.
 
 Clicks replay in ~80 ms per window. Drags replay with their original timing so
-scroll inertia matches. Wheel ticks are coalesced.
+scroll inertia matches. Wheel ticks are collected until the
+wheel has been still for 250 ms (`timing.wheelIdle`), then replayed in one go, so
+the replay never takes the pointer away while you are still scrolling.
 
 **Click offset** (off by default; 1, 5, 10, 15 or 20 px): instead of hitting the
 exact same relative spot everywhere, each target window's replay of a gesture is
